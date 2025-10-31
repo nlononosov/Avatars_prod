@@ -2,198 +2,201 @@ const tmi = require('tmi.js');
 const { logLine } = require('../lib/logger');
 const { getUserByTwitchId, saveOrUpdateAvatar, getAvatarByTwitchId, saveOrUpdateUser, addUserToStreamer } = require('../db');
 const { emit, emitToStreamer, getSubscriberCount, getStreamerSubscriberCount } = require('../lib/bus');
-
-// Помощник для отправки событий в канал стримера
-function emitOverlay(event, payload, channel) {
-  logLine(`[debug] emitOverlay: event="${event}", payload=`, payload, `channel="${channel}", botForUser="${botForUser}"`);
-  
-  // Оставляем обратную совместимость (глобальный), но главное — в канал стримера
-  try { emit(event, payload); } catch {}
-  let streamerId = botForUser;
-  if (!streamerId && channel) {
-    // channel вида "#login" → достаём логин и маппим на twitch_user_id
-    const login = String(channel).replace(/^#/, '');
-    try {
-      const { getUserByLogin } = require('../db'); // добавь экспорт, если его нет
-      const s = getUserByLogin(login);
-      if (s && s.twitch_user_id) streamerId = s.twitch_user_id;
-    } catch {}
-  }
-  
-  logLine(`[debug] emitOverlay: final streamerId="${streamerId}"`);
-  
-  if (streamerId) {
-    emitToStreamer(streamerId, event, payload);
-    logLine(`[debug] emitOverlay: sent to streamer ${streamerId}`);
-  } else {
-    logLine(`[debug] emitOverlay: no streamerId, event not sent to streamer`);
-  }
-}
 const { CLIENT_ID, CLIENT_SECRET } = require('../lib/config');
+
+// ==================== MULTI-BOT MANAGER ====================
+// Хранилище всех активных ботов по streamer_id
+const botClients = new Map(); // streamerId -> { client, profile, ready, states, interval }
 
 function normalizeChannel(ch) {
   if (!ch) return ch;
   return ch.startsWith('#') ? ch : `#${ch}`;
 }
 
-let tmiClient = null;
-let botForUser = null;
-let botReady = false; // Track if bot is fully connected and ready
-const activeAvatars = new Set(); // Track active avatar user IDs
-const avatarLastActivity = new Map(); // Track last activity time for each avatar
-const avatarStates = new Map(); // Track avatar states (normal, tired)
-let avatarTimeoutSeconds = 300; // Default timeout for inactive avatars (5 minutes)
-let avatarTimeoutInterval = null; // Interval for checking inactive avatars
+// Получить или создать состояние для стримера
+function getStreamerState(streamerId) {
+  if (!botClients.has(streamerId)) {
+    botClients.set(streamerId, {
+      activeAvatars: new Set(),
+      avatarLastActivity: new Map(),
+      avatarStates: new Map(),
+      avatarTimeoutInterval: null,
+      avatarTimeoutSeconds: 300,
+      raceState: {
+        isActive: false,
+        participants: new Set(),
+        participantNames: new Map(),
+        positions: new Map(),
+        speeds: new Map(),
+        modifiers: new Map(),
+        maxParticipants: 10,
+        countdown: 0,
+        raceStarted: false,
+        raceFinished: false,
+        winner: null,
+        speedModifiers: new Map(),
+        startTime: null
+      },
+      foodGameState: {
+        isActive: false,
+        participants: new Set(),
+        participantNames: new Map(),
+        scores: new Map(),
+        directions: new Map(),
+        speedModifiers: new Map(),
+        carrots: [],
+        gameStarted: false,
+        gameFinished: false,
+        startTime: null,
+        winner: null
+      },
+      racePlanState: {
+        isActive: false,
+        participants: new Set(),
+        participantNames: new Map(),
+        positions: new Map(),
+        levels: new Map(),
+        lives: new Map(),
+        obstacles: [],
+        gameStarted: false,
+        gameFinished: false,
+        startTime: null,
+        winner: null,
+        maxParticipants: 8,
+        trackWidth: 1200
+      },
+      Game: {
+        isActive: false,
+        gameFinished: false,
+        players: new Map(),
+        obstacles: [],
+        lanes: [0, 1, 2],
+        maxLives: 3
+      }
+    });
+  }
+  return botClients.get(streamerId);
+}
+// ==================== END MULTI-BOT MANAGER ====================
 
-// Функция для обновления тайминга удаления аватаров
-function setAvatarTimeoutSeconds(seconds) {
-  const oldTimeout = avatarTimeoutSeconds;
-  avatarTimeoutSeconds = seconds;
-  logLine(`[bot] Avatar timeout updated from ${oldTimeout}s to ${seconds}s`);
+// Помощник для отправки событий в канал стримера
+function emitOverlay(event, payload, channel, streamerId) {
+  if (streamerId) {
+    emitToStreamer(streamerId, event, payload);
+  } else {
+    emit(event, payload);
+  }
+}
+
+// Функция для обновления тайминга удаления аватаров (для конкретного стримера)
+function setAvatarTimeoutSeconds(streamerId, seconds) {
+  const state = getStreamerState(streamerId);
+  const oldTimeout = state.avatarTimeoutSeconds;
+  state.avatarTimeoutSeconds = seconds;
+  logLine(`[bot] Avatar timeout updated from ${oldTimeout}s to ${seconds}s for streamer ${streamerId}`);
   
   // Перезапускаем интервал с новым таймингом
-  if (avatarTimeoutInterval) {
-    clearInterval(avatarTimeoutInterval);
+  if (state.avatarTimeoutInterval) {
+    clearInterval(state.avatarTimeoutInterval);
   }
-  startAvatarTimeoutChecker();
+  startAvatarTimeoutChecker(streamerId);
 }
 
 // Функция для запуска проверки неактивных аватаров
-function startAvatarTimeoutChecker() {
-  if (avatarTimeoutInterval) {
-    clearInterval(avatarTimeoutInterval);
+function startAvatarTimeoutChecker(streamerId) {
+  const state = getStreamerState(streamerId);
+  if (state.avatarTimeoutInterval) {
+    clearInterval(state.avatarTimeoutInterval);
   }
   
   // Проверяем чаще: раз в секунду, либо динамически от таймаута
-  const period = Math.max(1000, Math.min(10000, Math.floor(avatarTimeoutSeconds * 1000 / 4)));
-  avatarTimeoutInterval = setInterval(checkInactiveAvatars, period);
+  const period = Math.max(1000, Math.min(10000, Math.floor(state.avatarTimeoutSeconds * 1000 / 4)));
+  state.avatarTimeoutInterval = setInterval(() => checkInactiveAvatars(streamerId), period);
   
   // Мгновенно проверить один раз при старте
-  checkInactiveAvatars();
+  checkInactiveAvatars(streamerId);
   
-  logLine(`[bot] Started avatar timeout checker (timeout=${avatarTimeoutSeconds}s, period=${period}ms)`);
+  logLine(`[bot] Started avatar timeout checker (timeout=${state.avatarTimeoutSeconds}s, period=${period}ms) for streamer ${streamerId}`);
 }
 
 // Функция для проверки и удаления неактивных аватаров
-function checkInactiveAvatars() {
+function checkInactiveAvatars(streamerId) {
+  const state = getStreamerState(streamerId);
   const now = Date.now();
   
   // Загружаем актуальные настройки из БД для текущего стримера
-  let currentTimeoutSeconds = avatarTimeoutSeconds; // Fallback на глобальную переменную
+  let currentTimeoutSeconds = state.avatarTimeoutSeconds;
   try {
-    if (botForUser) {
-      const { getAvatarTimeoutSeconds } = require('../db');
-      const dbTimeout = getAvatarTimeoutSeconds(botForUser);
-      if (dbTimeout) {
-        currentTimeoutSeconds = dbTimeout;
-        // Обновляем глобальную переменную для консистентности
-        if (dbTimeout !== avatarTimeoutSeconds) {
-          avatarTimeoutSeconds = dbTimeout;
-        }
+    const { getAvatarTimeoutSeconds } = require('../db');
+    const dbTimeout = getAvatarTimeoutSeconds(streamerId);
+    if (dbTimeout) {
+      currentTimeoutSeconds = dbTimeout;
+      if (dbTimeout !== state.avatarTimeoutSeconds) {
+        state.avatarTimeoutSeconds = dbTimeout;
       }
     }
   } catch (error) {
     logLine(`[bot] Error loading timeout from DB: ${error.message}`);
   }
   
-  const timeoutMs = currentTimeoutSeconds * 1000; // Конвертируем секунды в миллисекунды
-  const tiredTimeoutMs = timeoutMs / 2; // Половина времени для перехода в tired
+  const timeoutMs = currentTimeoutSeconds * 1000;
+  const tiredTimeoutMs = timeoutMs / 2;
   const inactiveUsers = [];
   const tiredUsers = [];
   
-  // Логируем текущие настройки для отладки
-  logLine(`[bot] Checking avatars with timeout: ${currentTimeoutSeconds}s (tired: ${Math.round(tiredTimeoutMs/1000)}s)`);
+  const botData = botClients.get(streamerId);
+  if (!botData || !botData.client) return;
   
-  for (const [userId, lastActivity] of avatarLastActivity.entries()) {
+  for (const [userId, lastActivity] of state.avatarLastActivity.entries()) {
     const timeSinceActivity = now - lastActivity;
     
     if (timeSinceActivity > timeoutMs) {
-      // Полное время истекло - удаляем аватар
       inactiveUsers.push(userId);
     } else if (timeSinceActivity > tiredTimeoutMs) {
-      // Половина времени истекла - переводим в tired
-      const currentState = avatarStates.get(userId);
+      const currentState = state.avatarStates.get(userId);
       if (currentState !== 'tired') {
         tiredUsers.push(userId);
       }
     }
   }
   
-  // Обрабатываем аватары, которые нужно перевести в tired
   if (tiredUsers.length > 0) {
-    logLine(`[bot] Setting ${tiredUsers.length} avatars to tired state`);
-    
     for (const userId of tiredUsers) {
-      avatarStates.set(userId, 'tired');
-      
-      // Отправляем событие смены состояния на tired
-      emitOverlay('avatarStateChanged', { 
-        userId, 
-        state: 'tired' 
-      }, getBotChannel());
+      state.avatarStates.set(userId, 'tired');
+      emitOverlay('avatarStateChanged', { userId, state: 'tired' }, null, streamerId);
     }
   }
   
-  // Обрабатываем аватары, которые нужно удалить
   if (inactiveUsers.length > 0) {
-    logLine(`[bot] Removing ${inactiveUsers.length} inactive avatars`);
-    
     for (const userId of inactiveUsers) {
-      // Удаляем из активных аватаров
-      activeAvatars.delete(userId);
-      avatarLastActivity.delete(userId);
-      avatarStates.delete(userId);
-      
-      // Отправляем событие удаления аватара
-      emitOverlay('avatarRemoved', { userId }, getBotChannel());
+      state.activeAvatars.delete(userId);
+      state.avatarLastActivity.delete(userId);
+      state.avatarStates.delete(userId);
+      emitOverlay('avatarRemoved', { userId }, null, streamerId);
     }
   }
 }
 
 // Функция для обновления активности аватара
-function updateAvatarActivity(userId) {
-  const previousState = avatarStates.get(userId);
-  avatarLastActivity.set(userId, Date.now());
-  activeAvatars.add(userId);
+function updateAvatarActivity(streamerId, userId) {
+  const state = getStreamerState(streamerId);
+  const previousState = state.avatarStates.get(userId);
+  state.avatarLastActivity.set(userId, Date.now());
+  state.activeAvatars.add(userId);
   
-  // Если аватар был в состоянии tired, сбрасываем его в normal
   if (previousState === 'tired') {
-    avatarStates.set(userId, 'normal');
-    logLine(`[bot] Avatar ${userId} returned to normal state after activity`);
-    
-    // Отправляем событие смены состояния на normal
-    emitOverlay('avatarStateChanged', { 
-      userId, 
-      state: 'normal' 
-    }, getBotChannel());
+    state.avatarStates.set(userId, 'normal');
+    emitOverlay('avatarStateChanged', { userId, state: 'normal' }, null, streamerId);
   } else if (!previousState) {
-    // Если это новый аватар, устанавливаем нормальное состояние
-    avatarStates.set(userId, 'normal');
-    logLine(`[bot] New avatar ${userId} added with normal state`);
+    state.avatarStates.set(userId, 'normal');
   }
 }
 
 // Функция для получения текущего тайминга
-function getAvatarTimeoutSeconds() {
-  return avatarTimeoutSeconds;
+function getAvatarTimeoutSeconds(streamerId) {
+  const state = getStreamerState(streamerId);
+  return state.avatarTimeoutSeconds;
 }
-
-// Race game state
-let raceState = {
-  isActive: false,
-  participants: new Set(),
-  participantNames: new Map(), // userId -> displayName
-  positions: new Map(),
-  speeds: new Map(),
-  modifiers: new Map(),
-  maxParticipants: 10,
-  countdown: 0,
-  raceStarted: false,
-  raceFinished: false,
-  winner: null,
-  speedModifiers: new Map(), // userId -> speed modifier
-  startTime: null
-};
 
 async function refreshToken(profile) {
   if (!profile.refresh_token) {
@@ -247,6 +250,13 @@ async function refreshToken(profile) {
 }
 
 async function ensureBotFor(uid) {
+  // Проверяем, есть ли уже бот для этого стримера
+  if (botClients.has(uid) && botClients.get(uid).client) {
+    const botData = botClients.get(uid);
+    logLine(`[bot] Already connected for user ${uid}`);
+    return { profile: botData.profile, client: botData.client };
+  }
+
   let profile = getUserByTwitchId(uid);
   if (!profile) throw new Error('User not found in DB');
 
@@ -260,19 +270,6 @@ async function ensureBotFor(uid) {
     }
   }
 
-  if (tmiClient && botForUser === uid) {
-    logLine(`[bot] Already connected for user ${uid}`);
-    return { profile, client: tmiClient };
-  }
-
-  if (tmiClient) { 
-    logLine(`[bot] Disconnecting previous client for user ${botForUser}`);
-    try { await tmiClient.disconnect(); } catch(_) {} 
-    tmiClient = null; 
-    botForUser = null;
-    botReady = false;
-  }
-
   const client = new tmi.Client({
     options: { debug: false },
     connection: { secure: true, reconnect: true },
@@ -280,51 +277,75 @@ async function ensureBotFor(uid) {
     channels: [ profile.login ]
   });
 
+  const states = getStreamerState(uid);
+  let avatarShowHandler = null;
+  let connectionResolver = null;
+  let connectionRejector = null;
+  
+  // Создаем Promise для ожидания подключения
+  const connectionPromise = new Promise((resolve, reject) => {
+    connectionResolver = resolve;
+    connectionRejector = reject;
+  });
+  
   client.on('connected', (addr, port) => {
-    logLine(`[bot] connected to ${addr}:${port} → #${profile.login}`);
-    botReady = true; // Bot is ready to process commands
+    logLine(`[bot] connected to ${addr}:${port} → #${profile.login} for streamer ${uid}`);
+    botClients.set(uid, { client, profile, ready: true, ...states });
     
     // Загружаем настройки тайминга из БД
     try {
       const { getAvatarTimeoutSeconds } = require('../db');
       const dbTimeout = getAvatarTimeoutSeconds(uid);
-      if (dbTimeout && dbTimeout !== avatarTimeoutSeconds) {
-        avatarTimeoutSeconds = dbTimeout;
+      if (dbTimeout && dbTimeout !== states.avatarTimeoutSeconds) {
+        states.avatarTimeoutSeconds = dbTimeout;
         logLine(`[bot] Loaded avatar timeout from DB: ${dbTimeout} seconds`);
       }
     } catch (error) {
       logLine(`[bot] Error loading timeout from DB: ${error.message}`);
     }
     
-    startAvatarTimeoutChecker(); // Запускаем проверку неактивных аватаров
+    startAvatarTimeoutChecker(uid);
     
     // Подписываемся на события bus для отслеживания аватаров из донатов
     const { on } = require('../lib/bus');
-    on('avatar:show', (data) => {
+    avatarShowHandler = (data) => {
       if (data.streamerId === uid && data.twitchUserId) {
         logLine(`[bot] Avatar shown via donation for user ${data.twitchUserId}`);
-        updateAvatarActivity(data.twitchUserId);
+        updateAvatarActivity(uid, data.twitchUserId);
       }
-    });
+    };
+    on('avatar:show', avatarShowHandler);
+    
+    // Разрешаем промис подключения
+    if (connectionResolver) {
+      connectionResolver({ profile, client });
+    }
   });
   client.on('disconnected', (reason) => {
-    logLine(`[bot] disconnected: ${reason}`);
-    botReady = false; // Bot is not ready
+    logLine(`[bot] disconnected for streamer ${uid}: ${reason}`);
+    if (botClients.has(uid)) {
+      botClients.get(uid).ready = false;
+    }
+    // Отписываемся от событий
+    if (avatarShowHandler) {
+      const { off } = require('../lib/bus');
+      off('avatar:show', avatarShowHandler);
+    }
   });
   client.on('notice', (channel, msgid, message) => {
     if (msgid === 'login_unrecognized') {
-      logLine(`[bot] authentication failed: ${message}`);
-      throw new Error('Login authentication failed');
+      logLine(`[bot] authentication failed for streamer ${uid}: ${message}`);
+      botClients.delete(uid);
+      if (connectionRejector) {
+        connectionRejector(new Error(`Login authentication failed: ${message}`));
+      }
     }
   });
   client.on('message', (channel, tags, message, self) => {
-    logLine(`[chat] ${channel} ${tags['display-name'] || tags.username}: ${message}`);
-    logLine(`[bot] Client object in message handler:`, typeof client, client ? 'exists' : 'null');
     if (self) return;
     
-    // Check if bot is ready to process commands
-    if (!botReady) {
-      logLine(`[bot] Ignoring command "${message}" - bot not ready yet`);
+    const botData = botClients.get(uid);
+    if (!botData || !botData.ready) {
       return;
     }
     
@@ -335,7 +356,7 @@ async function ensureBotFor(uid) {
     const isStreamer = tags['badges'] && (tags['badges'].broadcaster || tags['badges'].moderator);
     
     // Обновляем активность аватара при любом сообщении
-    updateAvatarActivity(userId);
+    updateAvatarActivity(uid, userId);
     
     if (text === '!ping') {
       client.say(channel, 'pong').catch(err => logLine(`[bot] say error: ${err.message}`));
@@ -343,37 +364,26 @@ async function ensureBotFor(uid) {
     }
 
     if (text === '!start') {
-      logLine(`[bot] !start command from ${displayName} (${userId}), botReady: ${botReady}, botForUser: ${botForUser}`);
-      
-      // Check if bot is ready
-      if (!botReady) {
-        logLine(`[bot] Bot not ready, ignoring !start command from ${displayName}`);
-        return;
-      }
-      
       // Ensure user exists in database first
       let user = getUserByTwitchId(userId);
       if (!user) {
-        // Create user record for chat user
         const userData = {
           twitch_user_id: userId,
           display_name: displayName,
-          login: displayName.toLowerCase().replace(/\s+/g, ''), // Generate login from display name
+          login: displayName.toLowerCase().replace(/\s+/g, ''),
           profile_image_url: null,
-          access_token: 'chat_user', // Placeholder for chat users
+          access_token: 'chat_user',
           refresh_token: null,
           scope: null,
           expires_at: null
         };
         saveOrUpdateUser(userData);
-        logLine(`[bot] Created user record for ${displayName} (${userId})`);
       }
       
       // Load or create default avatar
       let avatarData = getAvatarByTwitchId(userId);
       if (!avatarData) {
         try {
-          // Create default avatar for new user
           avatarData = {
             body_skin: 'body_skin_1',
             face_skin: 'face_skin_1', 
@@ -381,10 +391,7 @@ async function ensureBotFor(uid) {
             others_type: 'others_1'
           };
           saveOrUpdateAvatar(userId, avatarData);
-          logLine(`[bot] Created avatar for ${displayName} (${userId})`);
         } catch (error) {
-          logLine(`[bot] Error creating avatar for ${displayName}: ${error.message}`);
-          // Use default avatar data even if save failed
           avatarData = {
             body_skin: 'body_skin_1',
             face_skin: 'face_skin_1', 
@@ -395,172 +402,123 @@ async function ensureBotFor(uid) {
       }
       
       // Add user to streamer's chat list
-      if (botForUser) {
-        try {
-          const success = addUserToStreamer(userId, botForUser);
-          logLine(`[bot] Added user ${userId} to streamer ${botForUser}: ${success ? 'success' : 'failed'}`);
-        } catch (error) {
-          logLine(`[bot] Error adding user to streamer: ${error.message}`);
-        }
-      } else {
-        logLine(`[bot] Warning: botForUser is null, cannot add user ${userId} to streamer list`);
+      try {
+        addUserToStreamer(userId, uid);
+      } catch (error) {
+        logLine(`[bot] Error adding user to streamer: ${error.message}`);
       }
       
-      // Fire overlay spawn event with avatar data
-      const globalSubscriberCount = getSubscriberCount();
-      const streamerSubscriberCount = botForUser ? getStreamerSubscriberCount(botForUser) : 0;
-      logLine(`[bot] About to emit spawn event for ${displayName} (${userId}), global subscribers: ${globalSubscriberCount}, streamer subscribers: ${streamerSubscriberCount}`);
-      
-      const spawnData = {
-        userId,
-        displayName,
-        color,
+      // Emit avatar:show event
+      emitToStreamer(uid, 'avatar:show', {
+        streamerId: uid,
+        twitchUserId: userId,
+        displayName: displayName,
+        color: color,
         avatarData,
-        ts: Date.now()
-      };
+        source: 'twitch_chat'
+      });
       
-      // Emit avatar:show event for better handling
-      if (botForUser) {
-        emitToStreamer(botForUser, 'avatar:show', {
-          streamerId: botForUser,
-          twitchUserId: userId,
-          displayName: displayName,
-          color: color,
-          avatarData,
-          source: 'twitch_chat'
-        });
-        
-        logLine(`[bot] Emitted avatar:show event to streamer ${botForUser}`);
-      } else {
-        // на всякий случай оставим глобал только для старого дебага
-        emit('avatar:show', { twitchUserId: userId, displayName: displayName, color: color, avatarData, source: 'twitch_chat' });
-        logLine(`[bot] Warning: botForUser is null, emitted to global channel`);
-      }
-      
-      activeAvatars.add(userId);
-      logLine(`[overlay] spawn requested by ${displayName} (${userId})`);
+      states.activeAvatars.add(userId);
+      logLine(`[overlay] spawn requested by ${displayName} (${userId}) for streamer ${uid}`);
       return;
     }
 
-    // Race command - only for streamer (temporarily disabled for testing)
+    // Race command
     if (text === '!race') {
-      // Check if race is already active
-      if (raceState.isActive && !raceState.raceFinished) {
+      if (states.raceState.isActive && !states.raceState.raceFinished) {
         client.say(channel, '🏁 Гонка уже идет! Дождитесь завершения.').catch(err => logLine(`[bot] say error: ${err.message}`));
         return;
       }
-      // Temporarily allow all users to start race for testing
-      startRace(client, channel);
+      startRace(uid, client, channel, states.raceState);
       return;
     }
 
 
 
     // Check for race participation
-    if (text === '+' && raceState.isActive && !raceState.raceStarted) {
-      joinRace(userId, displayName, client, channel);
+    if (text === '+' && states.raceState.isActive && !states.raceState.raceStarted) {
+      joinRace(userId, displayName, client, channel, states.raceState);
       return;
     }
 
     // Check for race cheering (mentions during race)
-    if (raceState.isActive && raceState.raceStarted && !raceState.raceFinished) {
-      checkRaceCheering(text, client, channel);
+    if (states.raceState.isActive && states.raceState.raceStarted && !states.raceState.raceFinished) {
+      checkRaceCheering(text, client, channel, states.raceState);
     }
 
     // Check for food game registration
-    if (text === '+' && foodGameState.isActive && !foodGameState.gameStarted) {
-      joinFoodGame(userId, displayName, client, channel);
+    if (text === '+' && states.foodGameState.isActive && !states.foodGameState.gameStarted) {
+      joinFoodGame(userId, displayName, client, channel, states.foodGameState);
       return;
     }
 
     // Check for food game commands
-    if (foodGameState.isActive && foodGameState.gameStarted && !foodGameState.gameFinished) {
-      checkFoodGameCommand(text, userId, displayName, client, channel);
-      checkFoodGameCheering(text, client, channel);
+    if (states.foodGameState.isActive && states.foodGameState.gameStarted && !states.foodGameState.gameFinished) {
+      checkFoodGameCommand(text, userId, displayName, client, channel, states.foodGameState);
+      checkFoodGameCheering(text, client, channel, states.foodGameState);
     }
 
     // Race plan command
     if (text === '!race-plan') {
-      logLine(`[bot] Race plan command received from ${displayName} in channel ${channel}`);
-      logLine(`[bot] Client object in race-plan handler:`, typeof client, client ? 'exists' : 'null');
-      logLine(`[bot] client.say available:`, !!(client && client.say));
-      
-      // Check if race plan is already active
-      if (racePlanState.isActive && !racePlanState.gameFinished) {
-        logLine(`[bot] Race plan already active, sending message to channel`);
-        if (client && client.say) {
-          client.say(channel, '✈️ Гонка на самолетах уже идет! Дождитесь завершения.').catch(err => {
-            logLine(`[bot] say error: ${err.message}`);
-            logLine(`[bot] Full error: ${JSON.stringify(err)}`);
-          });
-        } else {
-          logLine(`[bot] ERROR: Cannot send message - client not available`);
-        }
+      if (states.racePlanState.isActive && !states.racePlanState.gameFinished) {
+        client.say(channel, '✈️ Гонка на самолетах уже идет! Дождитесь завершения.').catch(err => logLine(`[bot] say error: ${err.message}`));
         return;
       }
-      logLine(`[bot] Starting race plan...`);
-      startRacePlan(client, channel);
+      startRacePlan(uid, client, channel, states.racePlanState, states.Game);
       return;
     }
 
     // Check for race plan registration
-    if (text === '+' && racePlanState.isActive && !racePlanState.gameStarted) {
-      joinRacePlan(userId, displayName, client, channel);
+    if (text === '+' && states.racePlanState.isActive && !states.racePlanState.gameStarted) {
+      joinRacePlan(userId, displayName, client, channel, states.racePlanState, states.Game);
       return;
     }
 
     // Check for race plan commands
-    if (racePlanState.isActive && racePlanState.gameStarted && !racePlanState.gameFinished) {
-      checkRacePlanCommand(text, userId, displayName, client, channel);
-      checkRacePlanCheering(text, client, channel);
+    if (states.racePlanState.isActive && states.racePlanState.gameStarted && !states.racePlanState.gameFinished) {
+      checkRacePlanCommand(text, userId, displayName, client, channel, states.racePlanState, states.Game);
+      checkRacePlanCheering(text, client, channel, states.racePlanState, uid);
     }
 
 
     // смена полосы
-    if (Game.isActive && !Game.gameFinished) {
-      logLine(`[bot] Lane change command "${text}" from user ${userId}, Game.isActive: ${Game.isActive}, Game.gameFinished: ${Game.gameFinished}`);
+    if (states.Game.isActive && !states.Game.gameFinished) {
       if (UP_WORDS.has(text)) {
-        let p = Game.players.get(userId);
+        let p = states.Game.players.get(userId);
         if (!p) {
           p = { lane: 1, x: 50, width: 72, lives: 3, out: false, prevX: 50 };
-          Game.players.set(userId, p);
+          states.Game.players.set(userId, p);
         }
         const oldLane = p.lane ?? 1;
         p.lane = clampLane(oldLane - 1);
-        emitLevelUpdate(userId, p.lane, client, channel); // ← ключевая строка
-        logLine(`[bot] Player ${userId} moved from lane ${oldLane} to lane ${p.lane} (up)`);
+        emitLevelUpdate(userId, p.lane, client, channel, uid); 
         return;
       }
       if (DOWN_WORDS.has(text)) {
-        let p = Game.players.get(userId);
+        let p = states.Game.players.get(userId);
         if (!p) {
           p = { lane: 1, x: 50, width: 72, lives: 3, out: false, prevX: 50 };
-          Game.players.set(userId, p);
+          states.Game.players.set(userId, p);
         }
         const oldLane = p.lane ?? 1;
         p.lane = clampLane(oldLane + 1);
-        emitLevelUpdate(userId, p.lane, client, channel); // ← ключевая строка
-        logLine(`[bot] Player ${userId} moved from lane ${oldLane} to lane ${p.lane} (down)`);
+        emitLevelUpdate(userId, p.lane, client, channel, uid); 
         return;
       }
     }
 
     // Если пользователь не активен в памяти — попробуем «лениво» восстановить
-    if (!activeAvatars.has(userId)) {
+    if (!states.activeAvatars.has(userId)) {
       const avatarData = getAvatarByTwitchId(userId);
       if (avatarData) {
-        // вернуть в активные и сразу же заспавнить на оверлее
-        addActiveAvatar(userId);
+        states.activeAvatars.add(userId);
         emitOverlay('spawn', {
           userId,
           displayName,
           color,
           avatarData,
           ts: Date.now()
-        }, channel);
-      } else {
-        // у пользователя нет аватара в БД — ничего не делаем
-        return;
+        }, channel, uid);
       }
     }
 
@@ -588,9 +546,8 @@ async function ensureBotFor(uid) {
     logLine(`[debug] Greeting check for "${message}": ${isGreetingResult}`);
     
     if (isGreetingResult) {
-      emitOverlay('hi', { userId }, channel);
-      logLine(`[overlay] hi requested by ${displayName} (${userId}) for: "${message}"`);
-      return; // только анимация hi, без движения
+      emitOverlay('hi', { userId }, channel, uid);
+      return;
     }
 
     // Смех: Unicode-регэксп с явными разделителями до/после ИЛИ концом строки
@@ -620,9 +577,8 @@ async function ensureBotFor(uid) {
     }
     
     if (isLaughing(message)) {
-      emitOverlay('laugh', { userId }, channel);
-      logLine(`[overlay] laugh requested by ${displayName} (${userId}) for: "${message}"`);
-      return; // только анимация laugh, без движения
+      emitOverlay('laugh', { userId }, channel, uid);
+      return;
     }
     
     // 1) Эмоты Twitch приходят в tags.emotes как диапазоны "start-end"
@@ -660,86 +616,121 @@ async function ensureBotFor(uid) {
       }
       
       const emoji = extractFirstEmojiUrl(message, tags);
-      console.log(`[bot] Emoji detected: "${emoji}" for user ${displayName}`);
-      emitOverlay('emoji', { userId, emoji }, channel);
-      return; // критично: НЕ отправляем move
+      emitOverlay('emoji', { userId, emoji }, channel, uid);
+      return;
     }
     
     // No emotes found - normal movement
     const messageLength = message.length;
-    const moveDistance = Math.min(messageLength * 8, 200); // Max 200px movement
-    const direction = Math.random() > 0.5 ? 1 : -1; // Random left/right
+    const moveDistance = Math.min(messageLength * 8, 200);
+    const direction = Math.random() > 0.5 ? 1 : -1;
     
-    logLine(`[overlay] move requested by ${displayName} (${userId}) for message: "${message}" - distance: ${moveDistance * direction}`);
     emitOverlay('move', {
       userId,
       distance: moveDistance * direction,
       messageLength
-    }, channel);
+    }, channel, uid);
   });
 
   try {
+    // Запускаем подключение
     await client.connect();
-    tmiClient = client;
-    botForUser = profile.twitch_user_id; // ID стримера для связи с пользователями
-    return { profile, client };
+    
+    // Устанавливаем таймаут для промиса подключения
+    const timeout = setTimeout(() => {
+      if (connectionRejector) {
+        connectionRejector(new Error('Connection timeout'));
+      }
+    }, 10000);
+    
+    // Ожидаем успешного подключения или ошибки
+    const result = await Promise.race([
+      connectionPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 10000))
+    ]);
+    
+    clearTimeout(timeout);
+    return result;
   } catch (error) {
     logLine(`[bot] connection failed: ${error.message}`);
+    botClients.delete(uid);
     throw error;
   }
 }
 
-async function stopBot() {
-  if (!tmiClient) return false;
-  await tmiClient.disconnect();
-  tmiClient = null; 
-  botForUser = null;
-  botReady = false;
-  activeAvatars.clear();
-  logLine('[bot] stopped');
+async function stopBot(streamerId) {
+  if (!streamerId) {
+    // Stop all bots if no streamerId provided
+    const promises = Array.from(botClients.keys()).map(id => stopBotForStreamer(id));
+    await Promise.all(promises);
+    return true;
+  }
+  return await stopBotForStreamer(streamerId);
+}
+
+async function stopBotForStreamer(streamerId) {
+  if (!botClients.has(streamerId)) return false;
+  
+  const botData = botClients.get(streamerId);
+  if (botData.client) {
+    try {
+      await botData.client.disconnect();
+    } catch (error) {
+      logLine(`[bot] error disconnecting bot for streamer ${streamerId}: ${error.message}`);
+    }
+  }
+  
+  if (botData.avatarTimeoutInterval) {
+    clearInterval(botData.avatarTimeoutInterval);
+  }
+  
+  botClients.delete(streamerId);
+  logLine(`[bot] stopped for streamer ${streamerId}`);
   return true;
 }
 
 function status() {
   return { 
-    running: Boolean(tmiClient), 
-    for_user: botForUser || null,
-    activeAvatars: Array.from(activeAvatars)
+    running: botClients.size > 0,
+    bot_count: botClients.size,
+    bots: Array.from(botClients.entries()).map(([streamerId, data]) => ({
+      streamerId,
+      ready: data.ready,
+      activeAvatars: Array.from(data.activeAvatars || [])
+    }))
   };
 }
 
 // Функция для добавления аватара в активный список (для донатов)
-function addActiveAvatar(userId) {
-  activeAvatars.add(userId);
-  logLine(`[bot] Added avatar ${userId} to active list`);
+function addActiveAvatar(streamerId, userId) {
+  const state = getStreamerState(streamerId);
+  state.activeAvatars.add(userId);
+  logLine(`[bot] Added avatar ${userId} to active list for streamer ${streamerId}`);
 }
 
 // Функция для удаления аватара из активного списка
-function removeActiveAvatar(userId) {
-  activeAvatars.delete(userId);
-  logLine(`[bot] Removed avatar ${userId} from active list`);
+function removeActiveAvatar(streamerId, userId) {
+  const state = getStreamerState(streamerId);
+  state.activeAvatars.delete(userId);
+  logLine(`[bot] Removed avatar ${userId} from active list for streamer ${streamerId}`);
 }
 
-function getBotClient() {
-  return tmiClient;
+function getBotClient(streamerId) {
+  if (!streamerId) return null;
+  const botData = botClients.get(streamerId);
+  return botData ? botData.client : null;
 }
 
 // Race game functions
-function startRace(client, channel, settings = {}) {
+function startRace(streamerId, client, channel, raceState, settings = {}) {
   const { minParticipants = 1, maxParticipants = 10, registrationTime = 10 } = settings;
-  
-  logLine(`[bot] Starting race in channel: ${channel} with settings:`, settings);
   
   // Prevent multiple race starts
   if (raceState.isActive && !raceState.raceFinished) {
-    logLine(`[bot] Race already active, ignoring start request`);
     return;
   }
   
-  // Allow starting new race even if one is active (reset previous race)
   if (raceState.isActive) {
-    logLine(`[bot] Resetting previous race state`);
-    // Reset race state
     raceState.isActive = false;
     raceState.participants.clear();
     raceState.participantNames.clear();
@@ -754,7 +745,6 @@ function startRace(client, channel, settings = {}) {
     raceState.countdown = 0;
   }
 
-  // Set race state
   raceState.isActive = true;
   raceState.countdown = 0;
   raceState.raceStarted = false;
@@ -764,11 +754,8 @@ function startRace(client, channel, settings = {}) {
   raceState.minParticipants = minParticipants;
   raceState.maxParticipants = maxParticipants;
 
-  // Announce race with settings
   client.say(channel, `🏁 Кто хочет участвовать в гонке, отправьте + в чат! У вас есть ${registrationTime} секунд! (${minParticipants}-${maxParticipants} участников)`).catch(err => logLine(`[bot] say error: ${err.message}`));
-  logLine(`[bot] Race announced in channel: ${channel}`);
   
-  // Start registration timer
   setTimeout(() => {
     if (raceState.participants.size < minParticipants) {
       client.say(channel, `⏰ Время вышло! Недостаточно участников (${raceState.participants.size}/${minParticipants}). Гонка отменена.`).catch(err => logLine(`[bot] say error: ${err.message}`));
@@ -776,30 +763,24 @@ function startRace(client, channel, settings = {}) {
       return;
     }
     
-    // Limit participants if too many joined
     if (raceState.participants.size > maxParticipants) {
       const participantsArray = Array.from(raceState.participants);
       const selectedParticipants = participantsArray.slice(0, maxParticipants);
-      
-      // Reset participants to only selected ones
       raceState.participants.clear();
       raceState.participantNames.clear();
-      
       selectedParticipants.forEach(participantId => {
         raceState.participants.add(participantId);
-        // Note: We'd need to store participant names separately to show them here
       });
-      
       client.say(channel, `🎯 Слишком много участников! Выбраны первые ${maxParticipants} участников.`).catch(err => logLine(`[bot] say error: ${err.message}`));
     }
     
-    startRaceCountdown(client, channel);
+    startRaceCountdown(streamerId, client, channel, raceState);
   }, registrationTime * 1000);
 }
 
-function joinRace(userId, displayName, client, channel) {
+function joinRace(userId, displayName, client, channel, raceState) {
   if (raceState.participants.has(userId)) {
-    return; // Already joined
+    return;
   }
 
   if (raceState.participants.size >= raceState.maxParticipants) {
@@ -811,9 +792,8 @@ function joinRace(userId, displayName, client, channel) {
   raceState.participantNames.set(userId, displayName);
   client.say(channel, `@${displayName} присоединился к гонке! (${raceState.participants.size}/${raceState.maxParticipants})`).catch(err => logLine(`[bot] say error: ${err.message}`));
 
-  // If we have enough participants, start immediately
   if (raceState.participants.size >= raceState.maxParticipants) {
-    setTimeout(() => startRaceCountdown(client, channel), 1000);
+    setTimeout(() => startRaceCountdown(raceState.raceStarted ? 'unknown' : 'streamer', client, channel, raceState), 1000);
   }
 }
 

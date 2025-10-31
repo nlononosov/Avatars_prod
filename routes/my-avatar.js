@@ -1,4 +1,4 @@
-const { getUserByTwitchId, getAvatarByTwitchId, getUserGifts, getUserGiftStats, getAvailableGifts, updateAvatarPart, getUserCoins, addUserCoins, getLockedSkins, getUserPurchasedSkins, isSkinPurchased, purchaseSkin, getSkinPrice, getAllSkinsWithPrices, updateSkinPrice, bulkUpdateSkinPrices, getGiftInfo } = require('../db');
+const { getUserByTwitchId, getAvatarByTwitchId, getUserGifts, getUserGiftStats, getAvailableGifts, updateAvatarPart, getUserCoins, addUserCoins, getLockedSkins, getUserPurchasedSkins, isSkinPurchased, purchaseSkin, getSkinPrice, getAllSkinsWithPrices, updateSkinPrice, bulkUpdateSkinPrices, getGiftInfo, refreshSkinsFromFilesystem } = require('../db');
 
 function registerMyAvatarRoute(app) {
 
@@ -298,6 +298,34 @@ function registerMyAvatarRoute(app) {
     }
   });
 
+  // API для обновления скинов из файловой системы
+  app.post('/api/admin/skins/refresh', (req, res) => {
+    const uid = req.cookies.uid;
+    if (!uid) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const user = getUserByTwitchId(uid);
+    if (!user || user.login !== '1_tosik_1') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    try {
+      const result = refreshSkinsFromFilesystem();
+      
+      res.json({
+        success: result.success,
+        message: result.success ? 
+          `Обновлено скинов из файловой системы: добавлено ${result.addedCount} новых скинов` : 
+          'Ошибка при обновлении скинов',
+        data: result
+      });
+    } catch (error) {
+      console.error('Error refreshing skins:', error);
+      res.status(500).json({ error: 'Failed to refresh skins' });
+    }
+  });
+
   // Админ-страница для управления ценами скинов
   app.get('/admin/skins', (req, res) => {
     const uid = req.cookies.uid;
@@ -403,6 +431,7 @@ function registerMyAvatarRoute(app) {
       <h2>Массовые действия</h2>
       <div class="bulk-actions">
         <button class="btn" onclick="loadSkins()">🔄 Обновить</button>
+        <button class="btn" onclick="refreshSkinsFromFilesystem()">📁 Обновить из файлов</button>
         <button class="btn save" onclick="saveAllChanges()">💾 Сохранить все изменения</button>
         <button class="btn secondary" onclick="resetAllChanges()">↩️ Сбросить изменения</button>
       </div>
@@ -435,6 +464,30 @@ function registerMyAvatarRoute(app) {
       } catch (error) {
         console.error('Error loading skins:', error);
         showMessage('Ошибка загрузки скинов', 'error');
+      }
+    }
+
+    // Обновление скинов из файловой системы
+    async function refreshSkinsFromFilesystem() {
+      try {
+        const response = await fetch('/api/admin/skins/refresh', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+          showMessage(data.message, 'success');
+          // Перезагружаем скины после обновления
+          await loadSkins();
+        } else {
+          showMessage('Ошибка обновления скинов: ' + data.error, 'error');
+        }
+      } catch (error) {
+        console.error('Error refreshing skins:', error);
+        showMessage('Ошибка обновления скинов', 'error');
       }
     }
 
@@ -953,7 +1006,7 @@ function registerMyAvatarRoute(app) {
   
   .stats-grid { 
     display: grid; 
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); 
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); 
     gap: 12px; 
     margin-bottom: 15px; 
   }
@@ -984,11 +1037,12 @@ function registerMyAvatarRoute(app) {
     border: 1px solid var(--border);
     transition: all 0.3s ease;
     position: relative;
-    overflow: hidden;
+    overflow: visible;
     display: flex;
     align-items: center;
     gap: 10px;
     cursor: pointer;
+    min-width: 0;
   }
   
   .stat-card::before {
@@ -1027,6 +1081,9 @@ function registerMyAvatarRoute(app) {
   
   .stat-info {
     flex: 1;
+    min-width: 0;
+    overflow-wrap: break-word;
+    word-wrap: break-word;
   }
   
   .stat-value { 
@@ -1034,14 +1091,16 @@ function registerMyAvatarRoute(app) {
     font-weight: 700; 
     color: var(--text-primary);
     margin-bottom: 4px;
-    line-height: 1;
+    line-height: 1.1;
   }
   
   .stat-label { 
     font-size: 16px; 
     color: var(--text-primary);
     font-weight: 600;
-    margin-bottom: 2px;
+    margin-bottom: 0;
+    line-height: 1.3;
+    word-wrap: break-word;
   }
   
   .stat-description { 
@@ -1614,39 +1673,34 @@ function registerMyAvatarRoute(app) {
             <div class="stat-info">
               <div class="stat-value">${giftStats.reduce((sum, stat) => sum + stat.total_gifts, 0)}</div>
               <div class="stat-label">Всего подарков</div>
-              <div class="stat-description">получено от зрителей</div>
             </div>
           </div>
           <div class="stat-card stat-unique clickable" onclick="showGiftsModal('unique')">
             <div class="stat-icon">✨</div>
             <div class="stat-info">
               <div class="stat-value">${gifts.length}</div>
-              <div class="stat-label">Уникальных типов</div>
-              <div class="stat-description">разных подарков</div>
+              <div class="stat-label">Уникальных подарков</div>
             </div>
           </div>
           <div class="stat-card stat-common clickable" onclick="showGiftsModal('common')">
             <div class="stat-icon">📦</div>
             <div class="stat-info">
               <div class="stat-value">${giftStats.find(s => s.gift_type === 'common')?.total_gifts || 0}</div>
-              <div class="stat-label">Обычных</div>
-              <div class="stat-description">подарки</div>
+              <div class="stat-label">Обычные подарки</div>
             </div>
           </div>
           <div class="stat-card stat-uncommon clickable" onclick="showGiftsModal('uncommon')">
             <div class="stat-icon">💎</div>
             <div class="stat-info">
               <div class="stat-value">${giftStats.find(s => s.gift_type === 'uncommon')?.total_gifts || 0}</div>
-              <div class="stat-label">Необычных</div>
-              <div class="stat-description">подарки</div>
+              <div class="stat-label">Необычные подарки</div>
             </div>
           </div>
           <div class="stat-card stat-rare clickable" onclick="showGiftsModal('rare')">
             <div class="stat-icon">👑</div>
             <div class="stat-info">
               <div class="stat-value">${giftStats.find(s => s.gift_type === 'rare')?.total_gifts || 0}</div>
-              <div class="stat-label">Редких</div>
-              <div class="stat-description">подарки</div>
+              <div class="stat-label">Редкие подарки</div>
             </div>
           </div>
         </div>

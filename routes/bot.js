@@ -7,12 +7,6 @@ function registerBotRoutes(app) {
       const uid = req.cookies.uid;
       if (!uid) return res.status(401).send('Неизвестен пользователь (нет cookie uid)');
       
-      // Check if bot is already running
-      const botStatus = status();
-      if (botStatus.running) {
-        return res.status(400).send('Бот уже подключен! Сначала остановите текущего бота.');
-      }
-      
       const { profile } = await ensureBotFor(String(uid));
       res.status(200).send(`✅ Бот успешно запущен и подключён к #${profile.login}. Напиши в чате "!ping" — ответит "pong".`);
     } catch (e) {
@@ -21,9 +15,10 @@ function registerBotRoutes(app) {
     }
   });
 
-  app.post('/bot/stop', async (_req, res) => {
+  app.post('/bot/stop', async (req, res) => {
     try {
-      const changed = await stopBot();
+      const uid = req.cookies.uid;
+      const changed = await stopBot(uid ? String(uid) : null);
       if (!changed) return res.status(200).send('Бот уже остановлен.');
       res.status(200).send('Бот остановлен.');
     } catch (e) {

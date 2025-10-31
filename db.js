@@ -213,32 +213,72 @@ CREATE TABLE IF NOT EXISTS donations_processed (
 );
 `);
 
+// 9) Индекс для быстрого поиска обработанных донатов
+db.exec(`CREATE INDEX IF NOT EXISTS idx_donations_processed_lookup ON donations_processed(streamer_twitch_id, donation_id);`);
+
 // 6) Инициализация заблокированных скинов
 (function initializeLockedSkins() {
   try {
-    // Проверяем, есть ли уже заблокированные скины
-    const existingSkins = db.prepare('SELECT COUNT(*) as count FROM locked_skins').get();
+    // Получаем все доступные скины из файловой системы
+    const allParts = getAvailableAvatarParts();
+    const allSkins = [];
     
-    if (existingSkins.count === 0) {
-      // Добавляем заблокированные скины
-      const lockedSkins = [
-        { skin_type: 'clothes', skin_id: 'clothes_type_2', price: 150 },
-        { skin_type: 'body', skin_id: 'body_skin_2', price: 200 },
-        { skin_type: 'face', skin_id: 'face_skin_2', price: 100 },
-        { skin_type: 'others', skin_id: 'others_2', price: 120 }
-      ];
-      
-      const insertStmt = db.prepare('INSERT INTO locked_skins (skin_type, skin_id, price) VALUES (?, ?, ?)');
-      lockedSkins.forEach(skin => {
-        insertStmt.run(skin.skin_type, skin.skin_id, skin.price);
+    Object.keys(allParts).forEach(skinType => {
+      allParts[skinType].forEach(part => {
+        allSkins.push({
+          skin_type: skinType,
+          skin_id: part.id,
+          price: getDefaultPriceForSkin(skinType, part.id)
+        });
       });
-      
-      console.log('[db] Initialized locked skins');
+    });
+    
+    // Проверяем каждый скин и добавляем его в заблокированные, если его там нет
+    const insertStmt = db.prepare('INSERT OR IGNORE INTO locked_skins (skin_type, skin_id, price) VALUES (?, ?, ?)');
+    let addedCount = 0;
+    
+    allSkins.forEach(skin => {
+      const existing = db.prepare('SELECT id FROM locked_skins WHERE skin_type = ? AND skin_id = ?').get(skin.skin_type, skin.skin_id);
+      if (!existing && skin.price > 0) {
+        insertStmt.run(skin.skin_type, skin.skin_id, skin.price);
+        addedCount++;
+      }
+    });
+    
+    if (addedCount > 0) {
+      console.log(`[db] Added ${addedCount} new locked skins automatically`);
     }
   } catch (error) {
     console.error('[db] Error initializing locked skins:', error);
   }
 })();
+
+// Функция для определения цены по умолчанию для скина
+function getDefaultPriceForSkin(skinType, skinId) {
+  // Скины с номером 1 всегда бесплатные
+  if (skinId.includes('_1') || skinId.endsWith('_1')) {
+    return 0;
+  }
+  
+  // Определяем цену в зависимости от типа и номера скина
+  const basePrices = {
+    'body': 200,
+    'face': 100,
+    'clothes': 150,
+    'others': 120
+  };
+  
+  const basePrice = basePrices[skinType] || 100;
+  
+  // Извлекаем номер скина для увеличения цены
+  const match = skinId.match(/_(\d+)$/);
+  if (match) {
+    const skinNumber = parseInt(match[1]);
+    return basePrice + (skinNumber - 2) * 50; // Увеличиваем цену на 50 монет за каждый номер
+  }
+  
+  return basePrice;
+}
 
 // 7) Очистка старых подарков для корректной работы новой системы
 (function clearOldGifts() {
@@ -582,6 +622,43 @@ function bulkUpdateSkinPrices(skins) {
     db.exec('ROLLBACK');
     console.error('Error in bulk update:', error);
     return { updated: 0, errors: [error.message] };
+  }
+}
+
+// Функция для принудительного обновления всех скинов из файловой системы
+function refreshSkinsFromFilesystem() {
+  try {
+    // Получаем все доступные скины из файловой системы
+    const allParts = getAvailableAvatarParts();
+    const allSkins = [];
+    
+    Object.keys(allParts).forEach(skinType => {
+      allParts[skinType].forEach(part => {
+        allSkins.push({
+          skin_type: skinType,
+          skin_id: part.id,
+          price: getDefaultPriceForSkin(skinType, part.id)
+        });
+      });
+    });
+    
+    // Проверяем каждый скин и добавляем его в заблокированные, если его там нет
+    const insertStmt = db.prepare('INSERT OR IGNORE INTO locked_skins (skin_type, skin_id, price) VALUES (?, ?, ?)');
+    let addedCount = 0;
+    
+    allSkins.forEach(skin => {
+      const existing = db.prepare('SELECT id FROM locked_skins WHERE skin_type = ? AND skin_id = ?').get(skin.skin_type, skin.skin_id);
+      if (!existing && skin.price > 0) {
+        insertStmt.run(skin.skin_type, skin.skin_id, skin.price);
+        addedCount++;
+      }
+    });
+    
+    console.log(`[db] Refreshed skins from filesystem: ${addedCount} new skins added`);
+    return { success: true, addedCount, totalSkins: allSkins.length };
+  } catch (error) {
+    console.error('[db] Error refreshing skins from filesystem:', error);
+    return { success: false, error: error.message };
   }
 }
 
@@ -1043,6 +1120,8 @@ module.exports = {
   getAllSkinsWithPrices,
   updateSkinPrice,
   bulkUpdateSkinPrices,
+  getDefaultPriceForSkin,
+  refreshSkinsFromFilesystem,
   updateUserDAConnection,
   getUserDAConnection,
   getUsersWithDAConnection,

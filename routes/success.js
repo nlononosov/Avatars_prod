@@ -547,13 +547,9 @@ function registerSuccessRoute(app) {
         <div class="card">
           <h2>🤖 Управление ботом</h2>
           <div class="actions-grid">
-            <button class="btn btn-success" id="startBotBtn">
+            <button class="btn btn-success" id="toggleBotBtn">
               <span>▶️</span>
-              Запустить бота
-            </button>
-            <button class="btn btn-danger" id="stopBotBtn">
-              <span>⏹️</span>
-              Остановить бота
+              Подключить бота
             </button>
           </div>
           <div id="botStatus" class="status-indicator status-offline">
@@ -767,12 +763,21 @@ function registerSuccessRoute(app) {
     // Обновление отображения статуса бота
     function updateBotStatusDisplay() {
       const statusEl = document.getElementById('botStatus');
+      const btn = document.getElementById('toggleBotBtn');
       if (botStatus.running) {
         statusEl.className = 'status-indicator status-online';
         statusEl.innerHTML = '<span>●</span><span>Бот активен</span>';
-        } else {
+        if (btn) {
+          btn.className = 'btn btn-danger';
+          btn.innerHTML = '<span>⏹️</span> Отключить бота';
+        }
+      } else {
         statusEl.className = 'status-indicator status-offline';
         statusEl.innerHTML = '<span>●</span><span>Бот отключен</span>';
+        if (btn) {
+          btn.className = 'btn btn-success';
+          btn.innerHTML = '<span>▶️</span> Подключить бота';
+        }
       }
     }
 
@@ -813,50 +818,37 @@ function registerSuccessRoute(app) {
     }
 
     // Обработчики кнопок
-    document.getElementById('startBotBtn').onclick = async () => {
-      const btn = document.getElementById('startBotBtn');
+    document.getElementById('toggleBotBtn').onclick = async () => {
+      const btn = document.getElementById('toggleBotBtn');
       const originalText = btn.innerHTML;
-      
       try {
-        btn.innerHTML = '<span>⏳</span> Запуск...';
-        btn.disabled = true;
-        
-        const response = await fetch('/bot/start', { method:'POST' });
-        const text = await response.text();
-        
-        if (response.ok) {
-          showNotification('✅ ' + text, 'success');
-          await loadBotStatus();
+        if (botStatus.running) {
+          btn.innerHTML = '<span>⏳</span> Отключение...';
+          btn.disabled = true;
+          const response = await fetch('/bot/stop', { method: 'POST' });
+          const text = await response.text();
+          if (response.ok) {
+            showNotification('✅ ' + text, 'success');
+            botStatus.running = false;
+            updateBotStatusDisplay();
+          } else {
+            showNotification('❌ ' + text, 'error');
+          }
         } else {
-          showNotification('❌ ' + text, 'error');
+          btn.innerHTML = '<span>⏳</span> Подключение...';
+          btn.disabled = true;
+          const response = await fetch('/bot/start', { method: 'POST' });
+          const text = await response.text();
+          if (response.ok) {
+            showNotification('✅ ' + text, 'success');
+            botStatus.running = true;
+            updateBotStatusDisplay();
+          } else {
+            showNotification('❌ ' + text, 'error');
+          }
         }
       } catch (error) {
-        showNotification('❌ Ошибка запуска бота: ' + error.message, 'error');
-      } finally {
-        btn.innerHTML = originalText;
-        btn.disabled = false;
-      }
-    };
-
-    document.getElementById('stopBotBtn').onclick = async () => {
-      const btn = document.getElementById('stopBotBtn');
-      const originalText = btn.innerHTML;
-      
-      try {
-        btn.innerHTML = '<span>⏳</span> Остановка...';
-        btn.disabled = true;
-        
-        const response = await fetch('/bot/stop', { method:'POST' });
-        const text = await response.text();
-        
-        if (response.ok) {
-          showNotification('✅ ' + text, 'success');
-          await loadBotStatus();
-        } else {
-          showNotification('❌ ' + text, 'error');
-        }
-      } catch (error) {
-        showNotification('❌ Ошибка остановки бота: ' + error.message, 'error');
+        showNotification('❌ Ошибка: ' + error.message, 'error');
       } finally {
         btn.innerHTML = originalText;
         btn.disabled = false;
