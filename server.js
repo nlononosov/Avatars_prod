@@ -22,6 +22,7 @@ const { registerDonationAlertsConnectRoutes } = require('./routes/donationalerts
 const { registerDebugRoutes } = require('./routes/debug');
 const { registerGameRoutes } = require('./routes/games');
 const { overlayEventsHandler } = require('./lib/bus');
+const { registerMetrics } = require('./lib/metrics');
 const { handleWebhook, validateWebhook } = require('./lib/yookassa');
 const { initializeUsernameCache } = require('./lib/donationalerts');
 
@@ -32,6 +33,8 @@ app.use(express.json());
 app.use(express.static(__dirname));
 
 assertConfig(console);
+
+registerMetrics(app);
 
 // Logs SSE
 app.get('/events', sseHandler);

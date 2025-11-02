@@ -16,6 +16,7 @@
         "ioredis": "^5.4.1",
         "p-queue": "^8.0.1",
         "redlock": "^4.2.0",
+        "prom-client": "^15.1.2",
         "cookie-parser": "^1.4.6",
         "cors": "^2.8.5",
         "dotenv": "^16.4.5",

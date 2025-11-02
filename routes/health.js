@@ -32,6 +32,7 @@ function registerHealthRoute(app) {
       scalability: {
         canScaleHorizontally: !redisHealth.disabled,
         asyncDbEnabled: true,
+        dbWorkerThread: true,
         lazyCacheEnabled: true,
         dynamicPollingEnabled: true
       }
