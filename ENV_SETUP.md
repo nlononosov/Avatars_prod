@@ -20,11 +20,18 @@ BASE_URL=http://localhost:3000
 TWITCH_CLIENT_ID=ваш_twitch_client_id
 TWITCH_CLIENT_SECRET=ваш_twitch_client_secret
 
-# Redis configuration (для масштабирования)
+# Redis configuration (обязательно для масштабирования)
 REDIS_URL=redis://localhost:6379
+REDIS_REQUIRED=true
+REDIS_TLS=false
+
+# DonationAlerts polling (автоматически масштабируется)
 DA_POLL_CONCURRENCY=4
 DA_POLL_INTERVAL_MS=5000
 DA_POLL_LOCK_TTL_MS=4500
+
+# Database concurrency
+DB_CONCURRENCY=4
 ```
 
 ### 2. Получите данные из кабинета ЮKassa

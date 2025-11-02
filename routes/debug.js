@@ -82,7 +82,7 @@ function registerDebugRoutes(app) {
       logLine(`[DEBUG] Отправка тест-аватара: ${username}`);
 
       // Ищем пользователя
-      let user = findUserByUsername(username);
+      let user = await findUserByUsername(username);
       if (!user) {
         return res.status(404).send(`Пользователь ${username} не найден`);
       }
