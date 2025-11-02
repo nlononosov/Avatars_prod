@@ -852,10 +852,11 @@
           const avatar = data.data;
           
           // Extract IDs from the full names
-          const bodyId = avatar.body_skin ? avatar.body_skin.replace('body_skin_', '') : '1';
-          const faceId = avatar.face_skin ? avatar.face_skin.replace('face_skin_', '') : '1';
-          const clothesId = avatar.clothes_type ? avatar.clothes_type.replace('clothes_type_', '') : '1';
-          const othersId = avatar.others_type ? avatar.others_type.replace('others_', '') : '1';
+          // Извлекаем ID из полных названий частей
+          const bodyId = avatar.body_skin ? avatar.body_skin.replace(/^body_skin_/, '') : '1';
+          const faceId = avatar.face_skin ? avatar.face_skin.replace(/^face_skin_/, '') : '1';
+          const clothesId = avatar.clothes_type ? avatar.clothes_type.replace(/^clothes_type_/, '') : '1';
+          const othersId = avatar.others_type ? avatar.others_type.replace(/^others_/, '') : '1';
           
           const userAssets = {
             body: `/parts/body/${avatar.body_skin || 'body_skin_1'}.png`,
@@ -972,7 +973,7 @@
         body: `/parts/body_tired/body_tired_skin_${avatarData?.bodyId || '1'}.png`,
         face: `/parts/face_tired/face_tired_skin_${avatarData?.faceId || '1'}.png`,
         clothes: `/parts/clothes_tired/clothes_tired_type_${avatarData?.clothesId || '1'}.png`,
-        others: `/parts/others_tired/others_tired_${avatarData?.othersId || '1'}_1.png`
+        others: `/parts/others_tired/others_tired_${avatarData?.othersId || '1'}.png`
       };
 
       for (const key of ['body','clothes','face','others']) {
@@ -982,7 +983,11 @@
         img.src = tiredAssets[key];
         img.style.opacity = '0';
         img.onload = () => console.log(`Loaded tired layer: ${key}`);
-        img.onerror = () => console.log(`Failed to load tired layer: ${key} - ${tiredAssets[key]}`);
+        img.onerror = () => {
+          console.log(`Failed to load tired layer: ${key} - ${tiredAssets[key]}`);
+          // Скрываем изображение, если файл не найден
+          img.style.display = 'none';
+        };
         root.appendChild(img);
       }
 
@@ -1652,7 +1657,7 @@
         body:    `/parts/body_tired/body_tired_skin_${bodyId}.png`,
         face:    `/parts/face_tired/face_tired_skin_${faceId}.png`,
         clothes: `/parts/clothes_tired/clothes_tired_type_${clothesId}.png`,
-        others:  `/parts/others_tired/others_tired_${othersId}_1.png`,
+        others:  `/parts/others_tired/others_tired_${othersId}.png`,
       };
       baseLayers.forEach(layer => {
         const img = document.createElement('img');
@@ -2198,7 +2203,7 @@
         body:    `/parts/body_tired/body_tired_skin_${bodyId}.png`,
         face:    `/parts/face_tired/face_tired_skin_${faceId}.png`,
         clothes: `/parts/clothes_tired/clothes_tired_type_${clothesId}.png`,
-        others:  `/parts/others_tired/others_tired_${othersId}_1.png`,
+        others:  `/parts/others_tired/others_tired_${othersId}.png`,
       };
       baseLayers.forEach(layer => {
         const img = document.createElement('img');
@@ -3783,10 +3788,11 @@
           // Update user avatar cache with new data
           if (data.avatarData) {
             // Extract IDs from the full names
-            const bodyId = data.avatarData.body_skin ? data.avatarData.body_skin.replace('body_skin_', '') : '1';
-            const faceId = data.avatarData.face_skin ? data.avatarData.face_skin.replace('face_skin_', '') : '1';
-            const clothesId = data.avatarData.clothes_type ? data.avatarData.clothes_type.replace('clothes_type_', '') : '1';
-            const othersId = data.avatarData.others_type ? data.avatarData.others_type.replace('others_', '') : '1';
+            // Извлекаем ID из полных названий частей
+            const bodyId = data.avatarData.body_skin ? data.avatarData.body_skin.replace(/^body_skin_/, '') : '1';
+            const faceId = data.avatarData.face_skin ? data.avatarData.face_skin.replace(/^face_skin_/, '') : '1';
+            const clothesId = data.avatarData.clothes_type ? data.avatarData.clothes_type.replace(/^clothes_type_/, '') : '1';
+            const othersId = data.avatarData.others_type ? data.avatarData.others_type.replace(/^others_/, '') : '1';
             
             const userAssets = {
               body: `/parts/body/${data.avatarData.body_skin || 'body_skin_1'}.png`,

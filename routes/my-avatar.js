@@ -2240,6 +2240,7 @@ function registerMyAvatarRoute(app) {
         </div>
         <div class="modal-actions">
           <button class="btn secondary" id="backBtn">Назад</button>
+          <button class="btn primary" id="saveChangesBtn" style="display: none;">💾 Сохранить изменения</button>
         </div>
       </div>
     </div>
@@ -2384,10 +2385,11 @@ function registerMyAvatarRoute(app) {
       const userId = '${uid}';
       let availableParts = {};
       let currentSelections = {};
-      let selectedPreset = null; // { body, face, clothes, others }
+      let selectedPreset = null; // { key?, body, face, clothes, others }
       let currentCoins = 0;
       let lockedSkins = {};
       let currentPurchaseSkin = null;
+      let presetDefinitions = [];
       
       
       // Загрузка монет пользователя
@@ -2488,22 +2490,29 @@ function registerMyAvatarRoute(app) {
       }
 
       // Покупка скина (пакет недостающих частей)
-      let currentPresetPurchase = null; // { preset: number, items: [{skinType, skinId}], totalPrice }
+      let currentPresetPurchase = null; // { preset: string, items: [{skinType, skinId}], totalPrice }
 
-      function showPurchasePresetModal(presetNumber, missingItems, totalPrice) {
-        currentPresetPurchase = { preset: presetNumber, items: missingItems, totalPrice };
+      function showPurchasePresetModal(presetKey, missingItems, totalPrice) {
+        const preset = findPresetByKey(presetKey);
+        if (!preset) return;
+
+        currentPresetPurchase = { preset: presetKey, items: missingItems, totalPrice };
 
         // Превью скина
         const preview = document.getElementById('purchasePresetPreview');
+        const previewLayers = ['body', 'face', 'clothes', 'others']
+          .map(layer => {
+            const part = preset.parts[layer];
+            return part ? '<img class="layer ' + layer + '" alt="' + layer + '" src="' + part.path + '">' : '';
+          })
+          .join('');
         preview.innerHTML = ''
           + '<div class="avatar preset-preview" style="width: 160px; height: 160px;">'
-          +   '<img class="layer body"    alt="body"    src="/parts/body/body_skin_' + presetNumber + '.png">'
-          +   '<img class="layer face"    alt="face"    src="/parts/face/face_skin_' + presetNumber + '.png">'
-          +   '<img class="layer clothes" alt="clothes" src="/parts/clothes/clothes_type_' + presetNumber + '.png">'
-          +   '<img class="layer others"  alt="others"  src="/parts/others/others_' + presetNumber + '.png">'
+          +   previewLayers
           + '</div>';
 
-        document.getElementById('purchasePresetName').textContent = 'Полный скин';
+        const presetTitle = formatPresetTitle(presetKey, preset);
+        document.getElementById('purchasePresetName').textContent = 'Полный скин «' + presetTitle + '»';
         document.getElementById('purchasePresetPriceAmount').textContent = totalPrice.toLocaleString('ru-RU');
         const confirmBtn = document.getElementById('purchasePresetConfirm');
         if (currentCoins < totalPrice) {
@@ -2607,6 +2616,40 @@ function registerMyAvatarRoute(app) {
         }
       }
 
+      function derivePresetKey(partId) {
+        if (!partId) return null;
+        const numericMatch = partId.match(/(\d+)$/);
+        if (numericMatch) {
+          return numericMatch[1];
+        }
+        const parts = partId.split('_');
+        return parts.length ? parts[parts.length - 1] : partId;
+      }
+
+      function formatPresetTitle(key, preset) {
+        const titlesMap = { '1': 'Боб', '2': 'Вампир', '3': 'Вояка', '4': 'Врач' };
+        if (titlesMap[key]) {
+          return titlesMap[key];
+        }
+
+        if (/^\d+$/.test(key)) {
+          return 'Скин #' + key;
+        }
+
+        const sourceName = preset?.parts?.others?.name || preset?.parts?.clothes?.name || preset?.parts?.body?.name || preset?.parts?.face?.name || key;
+        return (sourceName || key)
+          .toString()
+          .replace(/[_-]+/g, ' ')
+          .split(' ')
+          .map(word => word ? word.charAt(0).toUpperCase() + word.slice(1) : '')
+          .join(' ')
+          .trim();
+      }
+
+      function findPresetByKey(key) {
+        return presetDefinitions.find(preset => preset.key === key);
+      }
+
       // Render customize interface
       function renderCustomizeInterface() {
         const grid = document.getElementById('customizeGrid');
@@ -2682,45 +2725,104 @@ function registerMyAvatarRoute(app) {
         const grid = document.getElementById('customizeGrid');
         grid.innerHTML = '';
 
-        const presetTitles = { 1: 'Боб', 2: 'Вампир', 3: 'Вояка', 4: 'Врач' };
-
-        // Рассчитываем доступные номера скинов по файлам частей (body/face/clothes обязательны)
-        function collectNumbers(parts, prefix) {
-          const set = new Set();
-          if (Array.isArray(parts)) {
-            parts.forEach(p => {
-              const m = (p && p.id) ? p.id.match(/(\d+)$/) : null;
-              if (m) set.add(m[1]);
-            });
-          }
-          return set;
-        }
-
-        const bodyNums = collectNumbers((availableParts && availableParts.body) || [], 'body_skin_');
-        const faceNums = collectNumbers((availableParts && availableParts.face) || [], 'face_skin_');
-        const clothesNums = collectNumbers((availableParts && availableParts.clothes) || [], 'clothes_type_');
-        // Пересечение номеров
-        const availableNumbers = Array.from(bodyNums).filter(n => faceNums.has(n) && clothesNums.has(n)).map(n => parseInt(n, 10)).sort((a,b) => a-b);
-        const numbersToShow = availableNumbers.length ? availableNumbers : [1,2,3];
-
         const section = document.createElement('div');
         section.className = 'layer-section';
+
+        const layers = ['body', 'face', 'clothes', 'others'];
+        const layerMaps = {};
+        layers.forEach(layer => {
+          layerMaps[layer] = new Map();
+          (availableParts?.[layer] || []).forEach(part => {
+            const key = derivePresetKey(part.id);
+            if (!key) return;
+            if (!layerMaps[layer].has(key)) {
+              layerMaps[layer].set(key, part);
+            }
+          });
+        });
+
+        const requiredLayers = ['body', 'face', 'clothes'];
+        let intersection = null;
+        requiredLayers.forEach(layer => {
+          const map = layerMaps[layer];
+          if (!map) return;
+          const currentKeys = Array.from(map.keys());
+          if (intersection === null) {
+            intersection = new Set(currentKeys);
+          } else {
+            intersection = new Set([...intersection].filter(key => map.has(key)));
+          }
+        });
+
+        const sortKeys = keys => keys.sort((a, b) => {
+          const aNum = Number(a);
+          const bNum = Number(b);
+          const aIsNum = !Number.isNaN(aNum);
+          const bIsNum = !Number.isNaN(bNum);
+          if (aIsNum && bIsNum) return aNum - bNum;
+          if (aIsNum) return -1;
+          if (bIsNum) return 1;
+          return a.localeCompare(b, 'ru', { sensitivity: 'base', numeric: true });
+        });
+
+        presetDefinitions = [];
+        if (intersection && intersection.size) {
+          const sortedKeys = sortKeys(Array.from(intersection));
+          presetDefinitions = sortedKeys.map(key => {
+            const presetParts = {};
+            layers.forEach(layer => {
+              const part = layerMaps[layer]?.get(key);
+              if (part) {
+                presetParts[layer] = part;
+              }
+            });
+            return { key: key.toString(), parts: presetParts };
+          });
+        }
+
+        if (!presetDefinitions.length) {
+          section.innerHTML = \`
+            <h3>Выберите скин</h3>
+            <p style="margin-top:12px;">Готовые скины пока недоступны. Перейдите к детальной настройке, чтобы собрать образ вручную.</p>
+            <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn secondary" id="toDetailedBtn">Перейти к детальной настройке</button>
+            </div>
+          \`;
+
+          grid.appendChild(section);
+
+          const toDetailedBtn = document.getElementById('toDetailedBtn');
+          if (toDetailedBtn) {
+            toDetailedBtn.addEventListener('click', () => {
+              loadAvailableParts();
+              currentCustomizeView = 'detailed';
+            });
+          }
+          return;
+        }
+
         section.innerHTML = \`
           <h3>Выберите скин</h3>
           <div class="presets-carousel">
             <button class="carousel-btn" id="presetsPrev">‹</button>
             <div class="presets-track" id="presetsGrid">
-              \${numbersToShow.map(n => \`
-                <div class="option-item preset-card" data-preset="\${n}">
-                  <div class="avatar preset-preview" aria-label="Скин \${presetTitles[n] || ('#' + n)}">
-                    <img class="layer body"    alt="body"    src="/parts/body/body_skin_\${n}.png">
-                    <img class="layer face"    alt="face"    src="/parts/face/face_skin_\${n}.png">
-                    <img class="layer clothes" alt="clothes" src="/parts/clothes/clothes_type_\${n}.png">
-                    <img class="layer others"  alt="others"  src="/parts/others/others_\${n}.png">
+              \${presetDefinitions.map(preset => {
+                const bodyPart = preset.parts.body;
+                const facePart = preset.parts.face;
+                const clothesPart = preset.parts.clothes;
+                const othersPart = preset.parts.others;
+                const name = formatPresetTitle(preset.key, preset);
+                return \`
+                <div class="option-item preset-card" data-preset-key="\${preset.key}">
+                  <div class="avatar preset-preview" aria-label="Скин \${name}">
+                    \${bodyPart ? \`<img class="layer body" alt="body" src="\${bodyPart.path}">\` : ''}
+                    \${facePart ? \`<img class="layer face" alt="face" src="\${facePart.path}">\` : ''}
+                    \${clothesPart ? \`<img class="layer clothes" alt="clothes" src="\${clothesPart.path}">\` : ''}
+                    \${othersPart ? \`<img class="layer others" alt="others" src="\${othersPart.path}">\` : ''}
                   </div>
-                  <div class="name">\${presetTitles[n] || ('Скин #' + n)}</div>
-                </div>
-              \`).join('')}
+                  <div class="name">\${name}</div>
+                </div>\`;
+              }).join('')}
             </div>
             <button class="carousel-btn" id="presetsNext">›</button>
           </div>
@@ -2731,27 +2833,30 @@ function registerMyAvatarRoute(app) {
 
         grid.appendChild(section);
 
-        // Помечаем скины, которые содержат некупленные части, и вешаем обработчики
-        const getPresetParts = (n) => ([
-          { skinType: 'body', skinId: 'body_skin_' + n },
-          { skinType: 'face', skinId: 'face_skin_' + n },
-          { skinType: 'clothes', skinId: 'clothes_type_' + n },
-          { skinType: 'others', skinId: 'others_' + n }
-        ]);
+        const getPresetParts = (presetKey) => {
+          const preset = findPresetByKey(presetKey);
+          if (!preset) return [];
+          return ['body', 'face', 'clothes', 'others']
+            .map(layer => {
+              const part = preset.parts[layer];
+              return part ? { skinType: layer, skinId: part.id } : null;
+            })
+            .filter(Boolean);
+        };
 
-        const getMissingParts = (n) => {
-          const parts = getPresetParts(n);
+        const getMissingParts = (presetKey) => {
+          const parts = getPresetParts(presetKey);
           return parts.filter(p => isSkinLocked(p.skinType, p.skinId));
         };
 
-        const getMissingTotalPrice = (n) => {
-          return getMissingParts(n).reduce((sum, p) => sum + (getSkinPrice(p.skinType, p.skinId) || 0), 0);
+        const getMissingTotalPrice = (presetKey) => {
+          return getMissingParts(presetKey).reduce((sum, p) => sum + (getSkinPrice(p.skinType, p.skinId) || 0), 0);
         };
 
         document.querySelectorAll('.preset-card').forEach(card => {
-          const n = Number(card.dataset.preset);
-          const missing = getMissingParts(n);
-          const totalPrice = getMissingTotalPrice(n);
+          const presetKey = card.dataset.presetKey;
+          const missing = getMissingParts(presetKey);
+          const totalPrice = getMissingTotalPrice(presetKey);
           if (missing.length > 0) {
             card.classList.add('locked');
             // бейдж с ценой
@@ -2763,10 +2868,12 @@ function registerMyAvatarRoute(app) {
           }
 
           card.addEventListener('click', function() {
-            if (missing.length > 0) {
-              showPurchasePresetModal(n, missing, totalPrice);
+            const currentMissing = getMissingParts(presetKey);
+            const currentTotal = getMissingTotalPrice(presetKey);
+            if (currentMissing.length > 0) {
+              showPurchasePresetModal(presetKey, currentMissing, currentTotal);
             } else {
-              applyPreset(n);
+              applyPreset(presetKey);
             }
           });
         });
@@ -2776,6 +2883,8 @@ function registerMyAvatarRoute(app) {
           toDetailedBtn.addEventListener('click', () => {
             loadAvailableParts();
             currentCustomizeView = 'detailed';
+            const saveBtn = document.getElementById('saveChangesBtn');
+            if (saveBtn) saveBtn.style.display = 'block';
           });
         }
 
@@ -2798,21 +2907,26 @@ function registerMyAvatarRoute(app) {
         }
       }
 
-      function applyPreset(n) {
+      function applyPreset(presetKey) {
+        const preset = findPresetByKey(presetKey);
+        if (!preset) return;
+
         selectedPreset = {
-          body: \`body_skin_\${n}\`,
-          face: \`face_skin_\${n}\`,
-          clothes: \`clothes_type_\${n}\`,
-          others: \`others_\${n}\`
+          key: presetKey,
+          body: preset.parts.body ? preset.parts.body.id : null,
+          face: preset.parts.face ? preset.parts.face.id : null,
+          clothes: preset.parts.clothes ? preset.parts.clothes.id : null,
+          others: preset.parts.others ? preset.parts.others.id : null
         };
 
         // Применяем скин сразу (без перехода в детальную настройку)
-        const selections = {
-          body: selectedPreset.body,
-          face: selectedPreset.face,
-          clothes: selectedPreset.clothes,
-          others: selectedPreset.others
-        };
+        const selections = {};
+        ['body', 'face', 'clothes', 'others'].forEach(layer => {
+          const partId = selectedPreset[layer];
+          if (partId) {
+            selections[layer] = partId;
+          }
+        });
         Object.assign(currentSelections, selections);
 
         const updates = Object.entries(selections).map(([partType, partId]) => {
@@ -2856,20 +2970,24 @@ function registerMyAvatarRoute(app) {
           if (data.success) {
             const avatar = data.data;
 
-            const base = selectedPreset || {
+            // Используем данные из базы, а не из selectedPreset, чтобы сохранить все части
+            const base = {
               body: avatar.body_skin,
               face: avatar.face_skin,
               clothes: avatar.clothes_type,
               others: avatar.others_type
             };
 
+            // Заполняем currentSelections всеми текущими частями
             [['body', base.body], ['face', base.face], ['clothes', base.clothes], ['others', base.others]].forEach(([layer, value]) => {
               if (!value) return;
+              // Сохраняем в currentSelections
+              currentSelections[layer] = value;
+              // Выделяем визуально в интерфейсе
               const item = document.querySelector(\`[data-layer="\${layer}"][data-part-id="\${value}"]\`);
               if (item) {
                 document.querySelectorAll(\`[data-layer="\${layer}"]\`).forEach(el => el.classList.remove('selected'));
                 item.classList.add('selected');
-                currentSelections[layer] = value;
               }
             });
           }
@@ -2880,20 +2998,42 @@ function registerMyAvatarRoute(app) {
 
       // Save changes
       async function saveChanges() {
-        const promises = Object.keys(currentSelections).map(layer => {
-          const partId = currentSelections[layer];
-          return fetch('/api/avatar/update', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: userId,
-              partType: layer,
-              partId: partId
-            })
-          });
-        });
-
+        // Убеждаемся, что все части сохранены, даже если пользователь их не менял
+        // Загружаем текущие данные аватара, чтобы сохранить все части
         try {
+          const avatarResponse = await fetch(\`/api/avatar/\${userId}\`);
+          const avatarData = await avatarResponse.json();
+          
+          // Объединяем текущие данные с выбранными пользователем
+          const allSelections = {
+            body: currentSelections.body || (avatarData.success ? avatarData.data.body_skin : null),
+            face: currentSelections.face || (avatarData.success ? avatarData.data.face_skin : null),
+            clothes: currentSelections.clothes || (avatarData.success ? avatarData.data.clothes_type : null),
+            others: currentSelections.others || (avatarData.success ? avatarData.data.others_type : null)
+          };
+          
+          // Фильтруем null значения
+          const selectionsToSave = {};
+          ['body', 'face', 'clothes', 'others'].forEach(layer => {
+            if (allSelections[layer]) {
+              selectionsToSave[layer] = allSelections[layer];
+            }
+          });
+
+          // Сохраняем все части
+          const promises = Object.keys(selectionsToSave).map(layer => {
+            const partId = selectionsToSave[layer];
+            return fetch('/api/avatar/update', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                userId: userId,
+                partType: layer,
+                partId: partId
+              })
+            });
+          });
+
           await Promise.all(promises);
           
           // Clear avatar cache to force reload of new appearance
@@ -2961,9 +3101,19 @@ function registerMyAvatarRoute(app) {
           if (currentCustomizeView === 'detailed') {
             renderPresetInterface();
             currentCustomizeView = 'presets';
+            const saveBtn = document.getElementById('saveChangesBtn');
+            if (saveBtn) saveBtn.style.display = 'none';
           } else {
             modal.style.display = 'none';
           }
+        });
+      }
+
+      // Save changes button handler
+      const saveChangesBtn = document.getElementById('saveChangesBtn');
+      if (saveChangesBtn) {
+        saveChangesBtn.addEventListener('click', async () => {
+          await saveChanges();
         });
       }
 
