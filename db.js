@@ -534,6 +534,100 @@ function purchaseSkin(twitchUserId, skinType, skinId, price) {
   }
 }
 
+// Админ: выдать доступ к скину пользователю (без списания монет)
+function grantSkinToUser(twitchUserId, skinType, skinId) {
+  try {
+    const stmt = db.prepare('INSERT OR IGNORE INTO user_purchased_skins (twitch_user_id, skin_type, skin_id) VALUES (?, ?, ?)');
+    stmt.run(twitchUserId, skinType, skinId);
+    return { success: true };
+  } catch (error) {
+    console.error('Error granting skin to user:', error);
+    return { success: false, error: 'Failed to grant skin' };
+  }
+}
+
+// Админ: отозвать доступ к скину у пользователя
+function revokeSkinFromUser(twitchUserId, skinType, skinId) {
+  try {
+    const stmt = db.prepare('DELETE FROM user_purchased_skins WHERE twitch_user_id = ? AND skin_type = ? AND skin_id = ?');
+    stmt.run(twitchUserId, skinType, skinId);
+    return { success: true };
+  } catch (error) {
+    console.error('Error revoking skin from user:', error);
+    return { success: false, error: 'Failed to revoke skin' };
+  }
+}
+
+// Админ: выдать доступ к нескольким скинам сразу (набор частей)
+function grantSkinsToUser(twitchUserId, items) {
+  try {
+    db.exec('BEGIN TRANSACTION');
+    const stmt = db.prepare('INSERT OR IGNORE INTO user_purchased_skins (twitch_user_id, skin_type, skin_id) VALUES (?, ?, ?)');
+    const unique = Array.from(new Map(items.map(i => [i.skinType + '_' + i.skinId, i])).values());
+    unique.forEach(i => stmt.run(twitchUserId, i.skinType, i.skinId));
+    db.exec('COMMIT');
+    return { success: true, count: unique.length };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    console.error('Error granting skins to user:', error);
+    return { success: false, error: 'Failed to grant skins' };
+  }
+}
+
+// Админ: отозвать доступ к нескольким скинам сразу (набор частей)
+function revokeSkinsFromUser(twitchUserId, items) {
+  try {
+    db.exec('BEGIN TRANSACTION');
+    const stmt = db.prepare('DELETE FROM user_purchased_skins WHERE twitch_user_id = ? AND skin_type = ? AND skin_id = ?');
+    const unique = Array.from(new Map(items.map(i => [i.skinType + '_' + i.skinId, i])).values());
+    unique.forEach(i => stmt.run(twitchUserId, i.skinType, i.skinId));
+    db.exec('COMMIT');
+    return { success: true, count: unique.length };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    console.error('Error revoking skins from user:', error);
+    return { success: false, error: 'Failed to revoke skins' };
+  }
+}
+
+function purchaseSkinsBundle(twitchUserId, items) {
+  try {
+    const uniqueItems = Array.from(new Map(items.map(i => [`${i.skinType}_${i.skinId}`, i])).values());
+    const purchasable = uniqueItems.filter(i => {
+      const price = getSkinPrice(i.skinType, i.skinId);
+      if (!price || price <= 0) return false;
+      return !isSkinPurchased(twitchUserId, i.skinType, i.skinId);
+    });
+
+    const totalPrice = purchasable.reduce((sum, i) => sum + (getSkinPrice(i.skinType, i.skinId) || 0), 0);
+    const currentCoins = getUserCoins(twitchUserId);
+
+    if (purchasable.length === 0 || totalPrice === 0) {
+      return { success: false, error: 'Нет частей для покупки' };
+    }
+
+    if (currentCoins < totalPrice) {
+      return { success: false, error: 'Недостаточно монет' };
+    }
+
+    db.exec('BEGIN TRANSACTION');
+    const newCoins = currentCoins - totalPrice;
+    updateUserCoins(twitchUserId, newCoins);
+
+    const insertStmt = db.prepare('INSERT INTO user_purchased_skins (twitch_user_id, skin_type, skin_id) VALUES (?, ?, ?)');
+    purchasable.forEach(i => {
+      insertStmt.run(twitchUserId, i.skinType, i.skinId);
+    });
+
+    db.exec('COMMIT');
+    return { success: true, newCoins, purchasedCount: purchasable.length, totalPrice };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    console.error('Error purchasing skins bundle:', error);
+    return { success: false, error: 'Ошибка при покупке пресета' };
+  }
+}
+
 function getSkinPrice(skinType, skinId) {
   const skin = db.prepare('SELECT price FROM locked_skins WHERE skin_type = ? AND skin_id = ?').get(skinType, skinId);
   return skin ? skin.price : 0;
@@ -762,9 +856,10 @@ function getAvailableAvatarParts() {
     const layerDir = path.join(partsDir, layer);
     if (fs.existsSync(layerDir)) {
       const files = fs.readdirSync(layerDir)
-        .filter(file => file.endsWith('.png'))
+        .filter(file => file.toLowerCase().endsWith('.png'))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
         .map(file => {
-          const name = file.replace('.png', '');
+          const { name } = path.parse(file);
           return {
             id: name,
             name: name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
@@ -789,9 +884,10 @@ function getAvailableGifts() {
     const giftDir = path.join(partsDir, giftType);
     if (fs.existsSync(giftDir)) {
       const files = fs.readdirSync(giftDir)
-        .filter(file => file.endsWith('.png'))
+        .filter(file => file.toLowerCase().endsWith('.png'))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
         .map(file => {
-          const name = file.replace('.png', '');
+          const { name } = path.parse(file);
           const rarity = giftType.replace('gift_', '');
           return {
             id: name,
@@ -1116,6 +1212,11 @@ module.exports = {
   getUserPurchasedSkins,
   isSkinPurchased,
   purchaseSkin,
+  grantSkinToUser,
+  revokeSkinFromUser,
+  grantSkinsToUser,
+  revokeSkinsFromUser,
+  purchaseSkinsBundle,
   getSkinPrice,
   getAllSkinsWithPrices,
   updateSkinPrice,

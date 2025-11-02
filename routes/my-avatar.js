@@ -1,4 +1,4 @@
-const { getUserByTwitchId, getAvatarByTwitchId, getUserGifts, getUserGiftStats, getAvailableGifts, updateAvatarPart, getUserCoins, addUserCoins, getLockedSkins, getUserPurchasedSkins, isSkinPurchased, purchaseSkin, getSkinPrice, getAllSkinsWithPrices, updateSkinPrice, bulkUpdateSkinPrices, getGiftInfo, refreshSkinsFromFilesystem } = require('../db');
+const { getUserByTwitchId, getAvatarByTwitchId, getUserGifts, getUserGiftStats, getAvailableGifts, updateAvatarPart, getUserCoins, addUserCoins, getLockedSkins, getUserPurchasedSkins, isSkinPurchased, purchaseSkin, purchaseSkinsBundle, getSkinPrice, getAllSkinsWithPrices, updateSkinPrice, bulkUpdateSkinPrices, getGiftInfo, refreshSkinsFromFilesystem, getAllUsers, grantSkinToUser, revokeSkinFromUser, grantSkinsToUser, revokeSkinsFromUser } = require('../db');
 
 function registerMyAvatarRoute(app) {
 
@@ -163,6 +163,31 @@ function registerMyAvatarRoute(app) {
     }
   });
 
+  // API для пакетной покупки частей скина
+  app.post('/api/skin/purchase-bundle', (req, res) => {
+    const uid = req.cookies.uid;
+    if (!uid) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { items } = req.body; // [{ skinType, skinId }]
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'Items must be a non-empty array' });
+    }
+
+    try {
+      const result = purchaseSkinsBundle(uid, items);
+      if (result.success) {
+        res.json({ success: true, data: { newCoins: result.newCoins, purchasedCount: result.purchasedCount, totalPrice: result.totalPrice } });
+      } else {
+        res.status(400).json({ error: result.error || 'Failed to purchase bundle' });
+      }
+    } catch (error) {
+      console.error('Error purchasing bundle:', error);
+      res.status(500).json({ error: 'Failed to purchase bundle' });
+    }
+  });
+
   // API для получения информации о подарках
   app.get('/api/gifts/info', (req, res) => {
     try {
@@ -265,6 +290,126 @@ function registerMyAvatarRoute(app) {
     } catch (error) {
       console.error('Error updating skin price:', error);
       res.status(500).json({ error: 'Failed to update skin price' });
+    }
+  });
+
+  // API: список пользователей (админ)
+  app.get('/api/admin/users', (req, res) => {
+    const uid = req.cookies.uid;
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    const user = getUserByTwitchId(uid);
+    if (!user || user.login !== '1_tosik_1') return res.status(403).json({ error: 'Access denied' });
+    const users = getAllUsers().map(u => ({
+      twitch_user_id: u.twitch_user_id,
+      display_name: u.display_name || u.login || u.twitch_user_id,
+      login: u.login || '',
+      coins: u.coins || 0
+    }));
+    res.json({ success: true, data: users });
+  });
+
+  // API: получить список скинов пользователя с пометкой куплено (админ)
+  app.get('/api/admin/user/:userId/skins', (req, res) => {
+    const uid = req.cookies.uid;
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    const user = getUserByTwitchId(uid);
+    if (!user || user.login !== '1_tosik_1') return res.status(403).json({ error: 'Access denied' });
+
+    const targetUserId = req.params.userId;
+    try {
+      const allSkins = getAllSkinsWithPrices();
+      const purchased = getUserPurchasedSkins(targetUserId);
+      const purchasedSet = new Set(purchased.map(s => `${s.skin_type}_${s.skin_id}`));
+      const result = allSkins.map(s => ({
+        ...s,
+        isPurchased: purchasedSet.has(`${s.skinType}_${s.skinId}`)
+      }));
+      res.json({ success: true, data: result });
+    } catch (e) {
+      console.error('Error getting user skins:', e);
+      res.status(500).json({ error: 'Failed to get user skins' });
+    }
+  });
+
+  // API: выставить доступ к скину (админ)
+  app.post('/api/admin/user/:userId/skins/set', (req, res) => {
+    const uid = req.cookies.uid;
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    const user = getUserByTwitchId(uid);
+    if (!user || user.login !== '1_tosik_1') return res.status(403).json({ error: 'Access denied' });
+
+    const targetUserId = req.params.userId;
+    const { skinType, skinId, purchased } = req.body;
+    if (!skinType || !skinId || typeof purchased !== 'boolean') {
+      return res.status(400).json({ error: 'Missing skinType, skinId or purchased' });
+    }
+    try {
+      const result = purchased
+        ? grantSkinToUser(targetUserId, skinType, skinId)
+        : revokeSkinFromUser(targetUserId, skinType, skinId);
+      if (result.success) return res.json({ success: true });
+      return res.status(400).json({ error: result.error || 'Failed to update' });
+    } catch (e) {
+      console.error('Error setting user skin:', e);
+      res.status(500).json({ error: 'Failed to set user skin' });
+    }
+  });
+
+  // API: массово выдать/отозвать полный скин (все части по номеру)
+  app.post('/api/admin/user/:userId/skins/bundle-set', (req, res) => {
+    const uid = req.cookies.uid;
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    const user = getUserByTwitchId(uid);
+    if (!user || user.login !== '1_tosik_1') return res.status(403).json({ error: 'Access denied' });
+
+    const targetUserId = req.params.userId;
+    const { number, purchased } = req.body; // number: numeric suffix, purchased: boolean
+    const n = String(number || '').trim();
+    if (!n || (purchased !== true && purchased !== false)) {
+      return res.status(400).json({ error: 'Missing number or purchased' });
+    }
+
+    const parts = [
+      { skinType: 'body', skinId: 'body_skin_' + n },
+      { skinType: 'face', skinId: 'face_skin_' + n },
+      { skinType: 'clothes', skinId: 'clothes_type_' + n },
+      { skinType: 'others', skinId: 'others_' + n }
+    ];
+
+    try {
+      let updated = 0;
+      parts.forEach(p => {
+        const result = purchased
+          ? grantSkinToUser(targetUserId, p.skinType, p.skinId)
+          : revokeSkinFromUser(targetUserId, p.skinType, p.skinId);
+        if (result && result.success) updated++;
+      });
+      return res.json({ success: true, updated });
+    } catch (e) {
+      console.error('Error setting bundle skins:', e);
+      return res.status(500).json({ error: 'Failed to set bundle' });
+    }
+  });
+
+  // API: пакетная выдача/отзыв набора частей (целый скин по номеру)
+  app.post('/api/admin/user/:userId/skins/set-bundle', (req, res) => {
+    const uid = req.cookies.uid;
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+    const user = getUserByTwitchId(uid);
+    if (!user || user.login !== '1_tosik_1') return res.status(403).json({ error: 'Access denied' });
+
+    const targetUserId = req.params.userId;
+    const { items, purchased } = req.body; // items: [{ skinType, skinId }]
+    if (!Array.isArray(items) || typeof purchased !== 'boolean') {
+      return res.status(400).json({ error: 'Missing items or purchased' });
+    }
+    try {
+      const result = purchased ? grantSkinsToUser(targetUserId, items) : revokeSkinsFromUser(targetUserId, items);
+      if (result.success) return res.json({ success: true, count: result.count });
+      return res.status(400).json({ error: result.error || 'Failed to update bundle' });
+    } catch (e) {
+      console.error('Error setting user skin bundle:', e);
+      res.status(500).json({ error: 'Failed to set user skin bundle' });
     }
   });
 
@@ -678,6 +823,316 @@ function registerMyAvatarRoute(app) {
 
     // Загружаем скины при загрузке страницы
     loadSkins();
+  </script>
+</body>
+</html>
+    `);
+  });
+
+  // Админ-страница: доступ к скинам пользователей
+  app.get('/admin/users', (req, res) => {
+    const uid = req.cookies.uid;
+    if (!uid) {
+      return res.redirect('/');
+    }
+
+    const user = getUserByTwitchId(uid);
+    if (!user) {
+      return res.redirect('/');
+    }
+
+    if (user.login !== '1_tosik_1') {
+      return res.status(403).send(`
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Доступ запрещен</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; min-height:100vh; display: flex; align-items: center; justify-content: center; }
+  .container { text-align: center; padding: 40px; }
+  .error-icon { font-size: 64px; margin-bottom: 20px; }
+  h1 { color: #f87171; margin-bottom: 20px; }
+  p { color: #9ca3af; margin-bottom: 30px; }
+  .back-btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; height: 48px; padding: 0 18px; background: #7c3aed; color: white; border: none; border-radius: 12px; cursor: pointer; font-weight: 600; font-size: 16px; }
+  .back-btn:hover { background: #6d28d9; }
+}</style>
+<body>
+  <div class="container">
+    <div class="error-icon">🚫</div>
+    <h1>Доступ запрещен</h1>
+    <p>У вас нет прав для доступа к админ-панели</p>
+    <a href="/my-avatar" class="back-btn">← Назад к аватару</a>
+  </div>
+</body>
+</html>
+      `);
+    }
+
+    const { displayName, login } = user;
+
+    res.send(`
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Доступ к скинам пользователей</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; min-height:100vh; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+  .header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+  .back-btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; height: 40px; padding: 0 16px; background: #7c3aed; color: white; border: none; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 14px; }
+  .back-btn:hover { background: #6d28d9; }
+  .layout { display: grid; grid-template-columns: 360px 1fr; gap: 20px; }
+  .card { background: #111827; padding: 16px; border-radius: 12px; border: 1px solid #374151; }
+  .search { width: 100%; padding: 10px 12px; background: #374151; border: 1px solid #6b7280; border-radius: 8px; color: #f1f5f9; }
+  .user-list { max-height: 70vh; overflow-y: auto; margin-top: 12px; display: grid; gap: 8px; }
+  .user-item { padding: 10px; border: 1px solid #374151; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; }
+  .user-item:hover { background: #1f2937; }
+  .user-item.active { border-color: #7c3aed; background: #1f2937; }
+  .skins-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .skin-card { background: #1f2937; padding: 12px; border-radius: 10px; border: 1px solid #374151; }
+  .skin-preview { width: 72px; height: 72px; background: #111827; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 8px; }
+  .skin-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .skin-name { font-weight: 700; font-size: 14px; }
+  .skin-meta { color: #9ca3af; font-size: 12px; margin: 4px 0 8px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 8px; border: none; cursor: pointer; font-weight: 600; }
+  .btn.grant { background: #10b981; color: white; }
+  .btn.revoke { background: #ef4444; color: white; }
+  .btn.neutral { background: #374151; color: #e2e8f0; }
+  .status { margin-top: 10px; font-size: 12px; color: #9ca3af; }
+</style>
+<body>
+  <div class="container">
+    <a href="/my-avatar" class="back-btn">← Назад</a>
+    <div class="header">
+      <h1>Доступ к скинам пользователей</h1>
+      <div><b>${displayName}</b> ${login ? `(@${login})` : ''}</div>
+    </div>
+
+    <div class="layout">
+      <div class="card">
+        <input id="userSearch" class="search" placeholder="Поиск пользователя по имени или логину" />
+        <div id="usersContainer" class="user-list">Загрузка пользователей...</div>
+      </div>
+      <div class="card">
+        <div id="selectedUserTitle" style="margin-bottom:10px; font-weight:700;">Выберите пользователя слева</div>
+        <div id="skinsContainer"></div>
+        <div id="statusMsg" class="status"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let allUsers = [];
+    let filteredUsers = [];
+    let selectedUserId = null;
+    let currentSkins = [];
+
+    async function loadUsers() {
+      const res = await fetch('/api/admin/users');
+      const data = await res.json();
+      if (data.success) {
+        allUsers = data.data;
+        filteredUsers = allUsers;
+        renderUsers();
+      } else {
+        document.getElementById('usersContainer').textContent = 'Не удалось загрузить пользователей';
+      }
+    }
+
+    function renderUsers() {
+      const container = document.getElementById('usersContainer');
+      if (!filteredUsers.length) { container.textContent = 'Ничего не найдено'; return; }
+      container.innerHTML = filteredUsers.map(function(u) {
+        return (
+          '<div class="user-item ' + (u.twitch_user_id === selectedUserId ? 'active' : '') + '" data-id="' + u.twitch_user_id + '">' +
+            '<div>' +
+              '<div style="font-weight:700;">' + (u.display_name || '') + '</div>' +
+              '<div style="color:#9ca3af; font-size:12px;">@' + (u.login || '') + '</div>' +
+            '</div>' +
+            '<div style="color:#fbbf24; font-weight:700;">' + ((u.coins||0).toLocaleString('ru-RU')) + ' 💰</div>' +
+          '</div>'
+        );
+      }).join('');
+      document.querySelectorAll('.user-item').forEach(el => {
+        el.addEventListener('click', () => {
+          selectedUserId = el.getAttribute('data-id');
+          document.getElementById('selectedUserTitle').textContent = 'Пользователь: ' + (filteredUsers.find(u => u.twitch_user_id === selectedUserId)?.display_name || selectedUserId);
+          renderUsers();
+          loadUserSkins();
+        });
+      });
+    }
+
+    document.getElementById('userSearch').addEventListener('input', (e) => {
+      const q = e.target.value.toLowerCase().trim();
+      filteredUsers = allUsers.filter(u =>
+        (u.display_name || '').toLowerCase().includes(q) ||
+        (u.login || '').toLowerCase().includes(q)
+      );
+      renderUsers();
+    });
+
+    async function loadUserSkins() {
+      if (!selectedUserId) return;
+      document.getElementById('skinsContainer').innerHTML = '<div class="loading">Загрузка скинов...</div>';
+      const res = await fetch('/api/admin/user/' + selectedUserId + '/skins');
+      const data = await res.json();
+      if (data.success) {
+        currentSkins = data.data;
+        renderSkins();
+      } else {
+        document.getElementById('skinsContainer').textContent = 'Не удалось загрузить скины пользователя';
+      }
+    }
+
+    function extractNumber(skinType, skinId) {
+      // Ожидаемые форматы: body_skin_N, face_skin_N, clothes_type_N, others_N
+      var match = (skinId || '').match(/(\d+)$/);
+      return match ? match[1] : null;
+    }
+
+    async function setBundle(number, purchased) {
+      if (!selectedUserId) return;
+      setStatus('Сохранение набора...');
+      const res = await fetch('/api/admin/user/' + selectedUserId + '/skins/bundle-set', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ number: number, purchased: !!purchased })
+      });
+      const data = await res.json();
+      if (data.success) {
+        // Обновляем локально статусы всех частей набора
+        var types = ['body','face','clothes','others'];
+        types.forEach(function(t){
+          var id = (t === 'body' ? 'body_skin_' : t === 'face' ? 'face_skin_' : t === 'clothes' ? 'clothes_type_' : 'others_') + number;
+          var item = currentSkins.find(function(s){ return s.skinType === t && s.skinId === id; });
+          if (item) item.isPurchased = !!purchased;
+        });
+        renderBundles();
+        renderSkins();
+        setStatus('Сохранено');
+      } else {
+        setStatus('Ошибка: ' + (data.error || ''));
+      }
+    }
+
+    function renderBundles() {
+      var container = document.getElementById('bundlesContainer');
+      if (!container) return;
+      // Группируем доступные номера по типам (others необязателен для показа набора)
+      var byType = { body: new Set(), face: new Set(), clothes: new Set(), others: new Set() };
+      currentSkins.forEach(function(s){
+        var n = extractNumber(s.skinType, s.skinId);
+        if (!n) return;
+        if (byType[s.skinType]) byType[s.skinType].add(n);
+      });
+      // Пересечение по базовым типам (body, face, clothes)
+      var numbers = Array.from(byType.body).filter(function(n){ return byType.face.has(n) && byType.clothes.has(n); });
+      numbers.sort(function(a,b){ return parseInt(a) - parseInt(b); });
+      if (numbers.length === 0) { container.innerHTML = '<div style="color:#9ca3af;">Нет доступных наборов</div>'; return; }
+
+      container.innerHTML = numbers.map(function(n){
+        // Получаем элементы набора
+        var parts = {
+          body: currentSkins.find(function(s){ return s.skinType==='body' && extractNumber('body', s.skinId)===n; }),
+          face: currentSkins.find(function(s){ return s.skinType==='face' && extractNumber('face', s.skinId)===n; }),
+          clothes: currentSkins.find(function(s){ return s.skinType==='clothes' && extractNumber('clothes', s.skinId)===n; }),
+          others: currentSkins.find(function(s){ return s.skinType==='others' && extractNumber('others', s.skinId)===n; })
+        };
+        var isAllPurchased = (
+          parts.body && parts.face && parts.clothes &&
+          parts.body.isPurchased && parts.face.isPurchased && parts.clothes.isPurchased &&
+          (parts.others ? parts.others.isPurchased : true)
+        );
+        var preview = (
+          '<div class="avatar preset-preview" style="width: 120px; height: 120px; margin-bottom:6px;">' +
+            '<img class="layer body"    alt="body"    src="' + (parts.body ? parts.body.path : '') + '">' +
+            '<img class="layer face"    alt="face"    src="' + (parts.face ? parts.face.path : '') + '">' +
+            '<img class="layer clothes" alt="clothes" src="' + (parts.clothes ? parts.clothes.path : '') + '">' +
+            '<img class="layer others"  alt="others"  src="' + (parts.others ? parts.others.path : '') + '">' +
+          '</div>'
+        );
+        return (
+          '<div class="skin-card" data-bundle="' + n + '">' +
+            preview +
+            '<div class="skin-name">Скин #' + n + '</div>' +
+            '<div class="skin-meta">' + (isAllPurchased ? 'Выдан' : 'Не выдан') + '</div>' +
+            '<button class="btn ' + (isAllPurchased ? 'revoke' : 'grant') + '" data-number="' + n + '" data-all="' + (isAllPurchased ? '1' : '0') + '">' + (isAllPurchased ? 'Отозвать все' : 'Выдать все') + '</button>' +
+          '</div>'
+        );
+      }).join('');
+
+      container.querySelectorAll('.btn').forEach(function(btn){
+        btn.addEventListener('click', function(){
+          var number = btn.getAttribute('data-number');
+          var isAll = btn.getAttribute('data-all') === '1';
+          setBundle(number, !isAll);
+        });
+      });
+    }
+
+    function renderSkins() {
+      var container = document.getElementById('skinsContainer');
+      if (!currentSkins.length) { container.textContent = 'Скины не найдены'; return; }
+
+      var typesOrder = ['body', 'face', 'clothes', 'others'];
+      var typeTitles = { body: 'Тело', face: 'Лицо', clothes: 'Одежда', others: 'Аксессуары' };
+      var grouped = { body: [], face: [], clothes: [], others: [] };
+      currentSkins.forEach(function(s){ if (grouped[s.skinType]) grouped[s.skinType].push(s); });
+
+      var html = '';
+      typesOrder.forEach(function(t){
+        if (!grouped[t] || grouped[t].length === 0) return;
+        html += '<div class="layer-section">';
+        html +=   '<h3 style="margin:0 0 10px; color:#fbbf24;">' + (typeTitles[t] || t) + '</h3>';
+        html +=   '<div class="skins-grid">';
+        grouped[t].forEach(function(s){
+          html +=   '<div class="skin-card" data-id="' + s.skinType + '_' + s.skinId + '">';
+          html +=     '<div class="skin-preview"><img src="' + s.path + '" alt="' + s.name + '"></div>';
+          html +=     '<div class="skin-name">' + s.name + '</div>';
+          html +=     '<div class="skin-meta">' + s.skinType + ' • ' + s.skinId + (s.price ? (' • ' + s.price + ' монет') : '') + '</div>';
+          html +=     '<button class="btn ' + (s.isPurchased ? 'revoke' : 'grant') + '" data-type="' + s.skinType + '" data-sid="' + s.skinId + '" data-purchased="' + (s.isPurchased ? '1' : '0') + '">'
+                    + (s.isPurchased ? 'Отозвать' : 'Выдать') + '</button>';
+          html +=   '</div>';
+        });
+        html +=   '</div>';
+        html += '</div>';
+      });
+
+      container.innerHTML = html;
+      Array.prototype.forEach.call(container.querySelectorAll('.btn'), function(btn){
+        btn.addEventListener('click', function(){ setUserSkin(btn); });
+      });
+    }
+
+    async function setUserSkin(btn) {
+      if (!selectedUserId) return;
+      const skinType = btn.getAttribute('data-type');
+      const skinId = btn.getAttribute('data-sid');
+      const purchased = btn.getAttribute('data-purchased') !== '1';
+      setStatus('Сохранение...');
+      const res = await fetch('/api/admin/user/' + selectedUserId + '/skins/set', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skinType, skinId, purchased })
+      });
+      const data = await res.json();
+      if (data.success) {
+        // обновляем локально
+        const item = currentSkins.find(s => s.skinType === skinType && s.skinId === skinId);
+        if (item) item.isPurchased = purchased;
+        renderSkins();
+        setStatus('Сохранено');
+      } else {
+        setStatus('Ошибка: ' + (data.error || '')); 
+      }
+    }
+
+    function setStatus(msg) { document.getElementById('statusMsg').textContent = msg; setTimeout(() => { document.getElementById('statusMsg').textContent = ''; }, 3000); }
+
+    loadUsers();
   </script>
 </body>
 </html>
@@ -1310,6 +1765,22 @@ function registerMyAvatarRoute(app) {
   
   .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); }
   .modal-content { background-color: #111827; margin: 2% auto; padding: 20px; border-radius: 16px; width: 95%; max-width: 900px; max-height: 95vh; overflow-y: auto; }
+  /* Специфичная раскладка для окна настройки внешнего вида: высота экрана и прокрутка контента */
+  #customizeModal .modal-content { 
+    width: 96%; 
+    max-width: 1100px; 
+    margin: 2vh auto; 
+    height: 96vh; 
+    max-height: 96vh; 
+    overflow: hidden; 
+    display: flex; 
+    flex-direction: column; 
+  }
+  #customizeContent { 
+    flex: 1; 
+    min-height: 0; 
+    overflow-y: auto; 
+  }
   .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
   .modal-header h2 { margin: 0; font-size: 20px; }
   .close { color: #aaa; font-size: 28px; font-weight: bold; cursor: pointer; }
@@ -1344,16 +1815,44 @@ function registerMyAvatarRoute(app) {
   .stat-item .gift-type.uncommon { background: #3b82f6; color: white; }
   .stat-item .gift-type.rare { background: #f59e0b; color: white; }
   
-  .customize-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }
+  .customize-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; align-content: start; }
   .layer-section { background: #1f2937; padding: 15px; border-radius: 12px; }
   .layer-section h3 { margin: 0 0 12px; font-size: 16px; color: #fbbf24; }
-  .options-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 12px; }
+  .options-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 10px; }
   .option-item { text-align: center; cursor: pointer; padding: 8px; border-radius: 8px; transition: all 0.2s; border: 2px solid transparent; position: relative; }
   .option-item:hover { background-color: #374151; border-color: #6b7280; }
   .option-item.selected { background-color: #7c3aed; border-color: #a855f7; box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.3); }
-  .option-item img { width: 60px; height: 60px; object-fit: contain; margin-bottom: 6px; }
+  .option-item img { width: 48px; height: 48px; object-fit: contain; margin-bottom: 6px; }
   .option-item .name { font-size: 11px; font-weight: 600; }
   .option-item.selected .name { color: white; font-weight: 700; }
+
+  /* Скины в окне настройки: компактные превью и горизонтальная прокрутка */
+  .presets-carousel { 
+    display: grid; 
+    grid-template-columns: 40px 1fr 40px; 
+    align-items: center; 
+    gap: 10px; 
+  }
+  .presets-track { 
+    display: grid; 
+    grid-auto-flow: column; 
+    grid-auto-columns: minmax(180px, 1fr); 
+    gap: 12px; 
+    overflow-x: auto; 
+    padding-bottom: 6px; 
+  }
+  .carousel-btn { 
+    height: 36px; 
+    width: 36px; 
+    border-radius: 8px; 
+    border: 1px solid #374151; 
+    background: #1f2937; 
+    color: #e2e8f0; 
+    cursor: pointer; 
+  }
+  .carousel-btn:hover { background: #374151; }
+  .preset-card { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .avatar.preset-preview { width: 140px; height: 140px; }
   
   .option-item.locked { cursor: pointer; position: relative; }
   .option-item.locked img { filter: blur(2px) brightness(0.6); }
@@ -1477,6 +1976,22 @@ function registerMyAvatarRoute(app) {
   
   .btn.purchase:disabled:hover {
     background: #6b7280;
+  }
+
+  /* Визуал блокировки скина */
+  .preset-card.locked .avatar.preset-preview { filter: blur(2px) brightness(0.6); }
+  .preset-card.locked .name { color: #9ca3af; }
+  .preset-lock-info { 
+    position: absolute; 
+    top: 8px; 
+    right: 8px; 
+    background: rgba(15,23,42,0.85); 
+    color: #fbbf24; 
+    border: 1px solid #f59e0b; 
+    border-radius: 8px; 
+    padding: 4px 8px; 
+    font-size: 12px; 
+    font-weight: 700; 
   }
   
   .add-coins-input-container {
@@ -1648,6 +2163,7 @@ function registerMyAvatarRoute(app) {
         Настроить внешний вид
       </button>
       ${login === '1_tosik_1' ? '<a href="/admin/skins" class="btn btn-secondary" style="text-decoration: none;"><span>⚙️</span> Управление ценами</a>' : ''}
+      ${login === '1_tosik_1' ? '<a href="/admin/users" class="btn btn-secondary" style="text-decoration: none;"><span>🧑‍💼</span> Доступ к скинам</a>' : ''}
     </div>
 
     <div class="main-content">
@@ -1723,9 +2239,7 @@ function registerMyAvatarRoute(app) {
           </div>
         </div>
         <div class="modal-actions">
-          <button class="btn secondary" id="resetBtn">Сбросить</button>
-          <button class="btn secondary" id="cancelBtn">Отмена</button>
-          <button class="btn" id="saveBtn">Сохранить</button>
+          <button class="btn secondary" id="backBtn">Назад</button>
         </div>
       </div>
     </div>
@@ -1772,6 +2286,47 @@ function registerMyAvatarRoute(app) {
           <div class="purchase-actions">
             <button class="btn secondary" id="purchaseCancel">Отмена</button>
             <button class="btn purchase" id="purchaseConfirm">Купить</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Purchase Preset Modal -->
+    <div id="purchasePresetModal" class="modal">
+      <div class="modal-content purchase-modal">
+        <div class="modal-header">
+          <h2>Покупка скина</h2>
+          <span class="close" id="purchasePresetClose">&times;</span>
+        </div>
+        <div class="purchase-content">
+          <div class="purchase-skin-preview" style="width: 180px; height: 180px;" id="purchasePresetPreview"></div>
+          <div class="purchase-info">
+            <h3 id="purchasePresetName">Полный скин</h3>
+            <div class="purchase-price" id="purchasePresetPrice">
+              <span class="coins-icon">
+                <svg width="20" height="20" viewBox="0 0 20 20" style="image-rendering: pixelated; image-rendering: -moz-crisp-edges; image-rendering: crisp-edges;">
+                  <defs>
+                    <linearGradient id="coinGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" style="stop-color:#FFD700;stop-opacity:1" />
+                      <stop offset="50%" style="stop-color:#FFA500;stop-opacity:1" />
+                      <stop offset="100%" style="stop-color:#FF8C00;stop-opacity:1" />
+                    </linearGradient>
+                  </defs>
+                  <circle cx="10" cy="10" r="9" fill="url(#coinGradient)" stroke="#B8860B" stroke-width="1"/>
+                  <circle cx="10" cy="10" r="6" fill="#FFD700" stroke="#DAA520" stroke-width="1"/>
+                  <circle cx="10" cy="10" r="2" fill="#FFA500"/>
+                  <rect x="6" y="4" width="2" height="2" fill="#FFFFE0" opacity="0.8"/>
+                  <rect x="12" y="6" width="1" height="1" fill="#FFFFE0" opacity="0.6"/>
+                  <rect x="4" y="12" width="1" height="1" fill="#FFFFE0" opacity="0.4"/>
+                </svg>
+              </span>
+              <span id="purchasePresetPriceAmount">0</span>
+            </div>
+            <p id="purchasePresetDescription">Списать монеты за недостающие части скина?</p>
+          </div>
+          <div class="purchase-actions">
+            <button class="btn secondary" id="purchasePresetCancel">Отмена</button>
+            <button class="btn purchase" id="purchasePresetConfirm">Купить скин</button>
           </div>
         </div>
       </div>
@@ -1829,6 +2384,7 @@ function registerMyAvatarRoute(app) {
       const userId = '${uid}';
       let availableParts = {};
       let currentSelections = {};
+      let selectedPreset = null; // { body, face, clothes, others }
       let currentCoins = 0;
       let lockedSkins = {};
       let currentPurchaseSkin = null;
@@ -1929,6 +2485,69 @@ function registerMyAvatarRoute(app) {
         
         // Показываем модальное окно
         document.getElementById('purchaseModal').style.display = 'block';
+      }
+
+      // Покупка скина (пакет недостающих частей)
+      let currentPresetPurchase = null; // { preset: number, items: [{skinType, skinId}], totalPrice }
+
+      function showPurchasePresetModal(presetNumber, missingItems, totalPrice) {
+        currentPresetPurchase = { preset: presetNumber, items: missingItems, totalPrice };
+
+        // Превью скина
+        const preview = document.getElementById('purchasePresetPreview');
+        preview.innerHTML = ''
+          + '<div class="avatar preset-preview" style="width: 160px; height: 160px;">'
+          +   '<img class="layer body"    alt="body"    src="/parts/body/body_skin_' + presetNumber + '.png">'
+          +   '<img class="layer face"    alt="face"    src="/parts/face/face_skin_' + presetNumber + '.png">'
+          +   '<img class="layer clothes" alt="clothes" src="/parts/clothes/clothes_type_' + presetNumber + '.png">'
+          +   '<img class="layer others"  alt="others"  src="/parts/others/others_' + presetNumber + '.png">'
+          + '</div>';
+
+        document.getElementById('purchasePresetName').textContent = 'Полный скин';
+        document.getElementById('purchasePresetPriceAmount').textContent = totalPrice.toLocaleString('ru-RU');
+        const confirmBtn = document.getElementById('purchasePresetConfirm');
+        if (currentCoins < totalPrice) {
+          confirmBtn.disabled = true;
+          confirmBtn.textContent = 'Недостаточно монет';
+        } else {
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'Купить скин';
+        }
+
+        document.getElementById('purchasePresetModal').style.display = 'block';
+      }
+
+      async function purchasePreset() {
+        if (!currentPresetPurchase) return;
+        try {
+          const response = await fetch('/api/skin/purchase-bundle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: currentPresetPurchase.items })
+          });
+
+          const data = await response.json();
+          if (data.success) {
+            currentCoins = data.data.newCoins;
+            updateCoinsDisplay();
+
+            // помечаем купленные как purchased
+            currentPresetPurchase.items.forEach(i => {
+              const key = i.skinType + '_' + i.skinId;
+              if (lockedSkins[key]) lockedSkins[key].isPurchased = true;
+            });
+
+            document.getElementById('purchasePresetModal').style.display = 'none';
+
+            // применяем скин
+            applyPreset(currentPresetPurchase.preset);
+          } else {
+            alert('Ошибка при покупке скина: ' + (data.error || ''));
+          }
+        } catch (e) {
+          console.error('Error purchasing preset bundle:', e);
+          alert('Ошибка при покупке скина');
+        }
       }
 
       // Покупка скина
@@ -2058,6 +2677,176 @@ function registerMyAvatarRoute(app) {
         });
       }
 
+      // Экран скинов перед детальной настройкой
+      function renderPresetInterface() {
+        const grid = document.getElementById('customizeGrid');
+        grid.innerHTML = '';
+
+        const presetTitles = { 1: 'Боб', 2: 'Вампир', 3: 'Вояка', 4: 'Врач' };
+
+        // Рассчитываем доступные номера скинов по файлам частей (body/face/clothes обязательны)
+        function collectNumbers(parts, prefix) {
+          const set = new Set();
+          if (Array.isArray(parts)) {
+            parts.forEach(p => {
+              const m = (p && p.id) ? p.id.match(/(\d+)$/) : null;
+              if (m) set.add(m[1]);
+            });
+          }
+          return set;
+        }
+
+        const bodyNums = collectNumbers((availableParts && availableParts.body) || [], 'body_skin_');
+        const faceNums = collectNumbers((availableParts && availableParts.face) || [], 'face_skin_');
+        const clothesNums = collectNumbers((availableParts && availableParts.clothes) || [], 'clothes_type_');
+        // Пересечение номеров
+        const availableNumbers = Array.from(bodyNums).filter(n => faceNums.has(n) && clothesNums.has(n)).map(n => parseInt(n, 10)).sort((a,b) => a-b);
+        const numbersToShow = availableNumbers.length ? availableNumbers : [1,2,3];
+
+        const section = document.createElement('div');
+        section.className = 'layer-section';
+        section.innerHTML = \`
+          <h3>Выберите скин</h3>
+          <div class="presets-carousel">
+            <button class="carousel-btn" id="presetsPrev">‹</button>
+            <div class="presets-track" id="presetsGrid">
+              \${numbersToShow.map(n => \`
+                <div class="option-item preset-card" data-preset="\${n}">
+                  <div class="avatar preset-preview" aria-label="Скин \${presetTitles[n] || ('#' + n)}">
+                    <img class="layer body"    alt="body"    src="/parts/body/body_skin_\${n}.png">
+                    <img class="layer face"    alt="face"    src="/parts/face/face_skin_\${n}.png">
+                    <img class="layer clothes" alt="clothes" src="/parts/clothes/clothes_type_\${n}.png">
+                    <img class="layer others"  alt="others"  src="/parts/others/others_\${n}.png">
+                  </div>
+                  <div class="name">\${presetTitles[n] || ('Скин #' + n)}</div>
+                </div>
+              \`).join('')}
+            </div>
+            <button class="carousel-btn" id="presetsNext">›</button>
+          </div>
+          <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn secondary" id="toDetailedBtn">Перейти к детальной настройке</button>
+          </div>
+        \`;
+
+        grid.appendChild(section);
+
+        // Помечаем скины, которые содержат некупленные части, и вешаем обработчики
+        const getPresetParts = (n) => ([
+          { skinType: 'body', skinId: 'body_skin_' + n },
+          { skinType: 'face', skinId: 'face_skin_' + n },
+          { skinType: 'clothes', skinId: 'clothes_type_' + n },
+          { skinType: 'others', skinId: 'others_' + n }
+        ]);
+
+        const getMissingParts = (n) => {
+          const parts = getPresetParts(n);
+          return parts.filter(p => isSkinLocked(p.skinType, p.skinId));
+        };
+
+        const getMissingTotalPrice = (n) => {
+          return getMissingParts(n).reduce((sum, p) => sum + (getSkinPrice(p.skinType, p.skinId) || 0), 0);
+        };
+
+        document.querySelectorAll('.preset-card').forEach(card => {
+          const n = Number(card.dataset.preset);
+          const missing = getMissingParts(n);
+          const totalPrice = getMissingTotalPrice(n);
+          if (missing.length > 0) {
+            card.classList.add('locked');
+            // бейдж с ценой
+            const badge = document.createElement('div');
+            badge.className = 'preset-lock-info';
+            badge.textContent = '🔒 ' + totalPrice;
+            card.style.position = 'relative';
+            card.appendChild(badge);
+          }
+
+          card.addEventListener('click', function() {
+            if (missing.length > 0) {
+              showPurchasePresetModal(n, missing, totalPrice);
+            } else {
+              applyPreset(n);
+            }
+          });
+        });
+
+        const toDetailedBtn = document.getElementById('toDetailedBtn');
+        if (toDetailedBtn) {
+          toDetailedBtn.addEventListener('click', () => {
+            loadAvailableParts();
+            currentCustomizeView = 'detailed';
+          });
+        }
+
+        const track = document.getElementById('presetsGrid');
+        const prevBtn = document.getElementById('presetsPrev');
+        const nextBtn = document.getElementById('presetsNext');
+        if (track && prevBtn && nextBtn) {
+          function rotate(direction) {
+            if (direction === 'next') {
+              const first = track.firstElementChild;
+              if (first) { track.appendChild(first); }
+            } else {
+              const last = track.lastElementChild;
+              if (last) { track.insertBefore(last, track.firstElementChild); }
+            }
+            track.scrollLeft = 0;
+          }
+          prevBtn.addEventListener('click', () => rotate('prev'));
+          nextBtn.addEventListener('click', () => rotate('next'));
+        }
+      }
+
+      function applyPreset(n) {
+        selectedPreset = {
+          body: \`body_skin_\${n}\`,
+          face: \`face_skin_\${n}\`,
+          clothes: \`clothes_type_\${n}\`,
+          others: \`others_\${n}\`
+        };
+
+        // Применяем скин сразу (без перехода в детальную настройку)
+        const selections = {
+          body: selectedPreset.body,
+          face: selectedPreset.face,
+          clothes: selectedPreset.clothes,
+          others: selectedPreset.others
+        };
+        Object.assign(currentSelections, selections);
+
+        const updates = Object.entries(selections).map(([partType, partId]) => {
+          return fetch('/api/avatar/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: userId, partType, partId })
+          });
+        });
+
+        (async () => {
+          try {
+            await Promise.all(updates);
+            await fetch('/api/avatar/clear-cache', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ userId: userId })
+            });
+            try {
+              await fetch('/api/avatar/update-stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: userId, streamerId: userId })
+              });
+            } catch (_) {}
+            // Обновляем страницу, чтобы показать применённые изменения
+            location.reload();
+          } catch (e) {
+            console.error('Error applying preset:', e);
+            alert('Ошибка при применении скина');
+          }
+        })();
+      }
+
       // Load current avatar data and pre-select current parts
       async function loadCurrentAvatarData() {
         try {
@@ -2066,39 +2855,23 @@ function registerMyAvatarRoute(app) {
           
           if (data.success) {
             const avatar = data.data;
-            
-            // Pre-select current parts
-            if (avatar.body_skin) {
-              const bodyItem = document.querySelector(\`[data-layer="body"][data-part-id="\${avatar.body_skin}"]\`);
-              if (bodyItem) {
-                bodyItem.classList.add('selected');
-                currentSelections.body = avatar.body_skin;
+
+            const base = selectedPreset || {
+              body: avatar.body_skin,
+              face: avatar.face_skin,
+              clothes: avatar.clothes_type,
+              others: avatar.others_type
+            };
+
+            [['body', base.body], ['face', base.face], ['clothes', base.clothes], ['others', base.others]].forEach(([layer, value]) => {
+              if (!value) return;
+              const item = document.querySelector(\`[data-layer="\${layer}"][data-part-id="\${value}"]\`);
+              if (item) {
+                document.querySelectorAll(\`[data-layer="\${layer}"]\`).forEach(el => el.classList.remove('selected'));
+                item.classList.add('selected');
+                currentSelections[layer] = value;
               }
-            }
-            
-            if (avatar.face_skin) {
-              const faceItem = document.querySelector(\`[data-layer="face"][data-part-id="\${avatar.face_skin}"]\`);
-              if (faceItem) {
-                faceItem.classList.add('selected');
-                currentSelections.face = avatar.face_skin;
-              }
-            }
-            
-            if (avatar.clothes_type) {
-              const clothesItem = document.querySelector(\`[data-layer="clothes"][data-part-id="\${avatar.clothes_type}"]\`);
-              if (clothesItem) {
-                clothesItem.classList.add('selected');
-                currentSelections.clothes = avatar.clothes_type;
-              }
-            }
-            
-            if (avatar.others_type) {
-              const othersItem = document.querySelector(\`[data-layer="others"][data-part-id="\${avatar.others_type}"]\`);
-              if (othersItem) {
-                othersItem.classList.add('selected');
-                currentSelections.others = avatar.others_type;
-              }
-            }
+            });
           }
         } catch (error) {
           console.error('Error loading current avatar data:', error);
@@ -2161,33 +2934,50 @@ function registerMyAvatarRoute(app) {
       const modal = document.getElementById('customizeModal');
       const customizeBtn = document.getElementById('customizeBtn');
       const closeBtn = document.querySelector('.close');
-      const resetBtn = document.getElementById('resetBtn');
-      const cancelBtn = document.getElementById('cancelBtn');
-      const saveBtn = document.getElementById('saveBtn');
+      const backBtn = document.getElementById('backBtn');
+      let currentCustomizeView = 'presets'; // 'presets' | 'detailed'
 
-      customizeBtn.addEventListener('click', () => {
+      customizeBtn.addEventListener('click', async () => {
         modal.style.display = 'block';
-        loadAvailableParts();
-        loadLockedSkins();
+        await loadLockedSkins();
+        await loadCoins();
+        try {
+          const resp = await fetch('/api/avatar/parts');
+          const data = await resp.json();
+          if (data && data.success) {
+            availableParts = data.data || {};
+          }
+        } catch (_) {}
+        renderPresetInterface();
+        currentCustomizeView = 'presets';
       });
 
       closeBtn.addEventListener('click', () => {
         modal.style.display = 'none';
       });
 
-      resetBtn.addEventListener('click', resetToCurrent);
-
-      cancelBtn.addEventListener('click', () => {
-        modal.style.display = 'none';
-      });
-
-      saveBtn.addEventListener('click', saveChanges);
+      if (backBtn) {
+        backBtn.addEventListener('click', () => {
+          if (currentCustomizeView === 'detailed') {
+            renderPresetInterface();
+            currentCustomizeView = 'presets';
+          } else {
+            modal.style.display = 'none';
+          }
+        });
+      }
 
       // Purchase modal handlers
       const purchaseModal = document.getElementById('purchaseModal');
       const purchaseClose = document.getElementById('purchaseClose');
       const purchaseCancel = document.getElementById('purchaseCancel');
       const purchaseConfirm = document.getElementById('purchaseConfirm');
+
+      // Purchase preset modal handlers
+      const purchasePresetModal = document.getElementById('purchasePresetModal');
+      const purchasePresetClose = document.getElementById('purchasePresetClose');
+      const purchasePresetCancel = document.getElementById('purchasePresetCancel');
+      const purchasePresetConfirm = document.getElementById('purchasePresetConfirm');
 
       purchaseClose.addEventListener('click', () => {
         purchaseModal.style.display = 'none';
@@ -2199,6 +2989,15 @@ function registerMyAvatarRoute(app) {
 
       purchaseConfirm.addEventListener('click', purchaseSkin);
 
+      // Preset purchase handlers
+      purchasePresetClose.addEventListener('click', () => {
+        purchasePresetModal.style.display = 'none';
+      });
+      purchasePresetCancel.addEventListener('click', () => {
+        purchasePresetModal.style.display = 'none';
+      });
+      purchasePresetConfirm.addEventListener('click', purchasePreset);
+
       // Close modal when clicking outside
       window.addEventListener('click', (event) => {
         if (event.target === modal) {
@@ -2206,6 +3005,9 @@ function registerMyAvatarRoute(app) {
         }
         if (event.target === purchaseModal) {
           purchaseModal.style.display = 'none';
+        }
+        if (event.target === purchasePresetModal) {
+          purchasePresetModal.style.display = 'none';
         }
       });
 
