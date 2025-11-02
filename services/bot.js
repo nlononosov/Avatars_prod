@@ -437,13 +437,13 @@ async function ensureBotFor(uid) {
 
     // Check for race participation
     if (text === '+' && states.raceState.isActive && !states.raceState.raceStarted) {
-      joinRace(userId, displayName, client, channel, states.raceState);
+      joinRace(uid, userId, displayName, client, channel, states.raceState);
       return;
     }
 
     // Check for race cheering (mentions during race)
     if (states.raceState.isActive && states.raceState.raceStarted && !states.raceState.raceFinished) {
-      checkRaceCheering(text, client, channel, states.raceState);
+      checkRaceCheering(text, client, channel, states.raceState, uid);
     }
 
     // Check for food game registration
@@ -715,11 +715,28 @@ function removeActiveAvatar(streamerId, userId) {
   logLine(`[bot] Removed avatar ${userId} from active list for streamer ${streamerId}`);
 }
 
-function getBotClient(streamerId) {
+function getBotClientFor(streamerId) {
   if (!streamerId) return null;
   const botData = botClients.get(streamerId);
   return botData ? botData.client : null;
 }
+
+// Получить Twitch-канал ("#login") для конкретного стримера
+function getBotChannelFor(streamerId) {
+  try {
+    const { getUserByTwitchId } = require('../db');
+    const profile = getUserByTwitchId(streamerId);
+    if (profile && profile.login) {
+      return normalizeChannel(profile.login);
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Доступ к состояниям стримера (гонки/игры)
+// getStreamerState уже объявлена выше в менеджере ботов
 
 // Race game functions
 function startRace(streamerId, client, channel, raceState, settings = {}) {
@@ -778,7 +795,7 @@ function startRace(streamerId, client, channel, raceState, settings = {}) {
   }, registrationTime * 1000);
 }
 
-function joinRace(userId, displayName, client, channel, raceState) {
+function joinRace(streamerId, userId, displayName, client, channel, raceState) {
   if (raceState.participants.has(userId)) {
     return;
   }
@@ -793,11 +810,11 @@ function joinRace(userId, displayName, client, channel, raceState) {
   client.say(channel, `@${displayName} присоединился к гонке! (${raceState.participants.size}/${raceState.maxParticipants})`).catch(err => logLine(`[bot] say error: ${err.message}`));
 
   if (raceState.participants.size >= raceState.maxParticipants) {
-    setTimeout(() => startRaceCountdown(raceState.raceStarted ? 'unknown' : 'streamer', client, channel, raceState), 1000);
+    setTimeout(() => startRaceCountdown(streamerId, client, channel, raceState), 1000);
   }
 }
 
-function startRaceCountdown(client, channel) {
+function startRaceCountdown(streamerId, client, channel, raceState) {
   if (!raceState.isActive) return;
 
   raceState.raceStarted = true;
@@ -809,7 +826,7 @@ function startRaceCountdown(client, channel) {
     countdown: 3
   };
   logLine(`[bot] Emitting raceStart event: ${JSON.stringify(raceStartData)}`);
-  emitOverlay('raceStart', raceStartData, channel);
+  emitOverlay('raceStart', raceStartData, channel, streamerId);
 
   // Countdown
   let count = 3;
@@ -822,20 +839,20 @@ function startRaceCountdown(client, channel) {
       client.say(channel, '🏁 ГОНКА НАЧАЛАСЬ! Бегите к финишу!').catch(err => logLine(`[bot] say error: ${err.message}`));
       
       // Start race monitoring
-      startRaceMonitoring(client, channel);
+      startRaceMonitoring(streamerId, client, channel, raceState);
     }
   }, 1000);
 }
 
-function startRaceMonitoring(client, channel) {
+function startRaceMonitoring(streamerId, client, channel, raceState) {
   // Emit race monitoring start
   emitOverlay('raceMonitoring', {
     participants: Array.from(raceState.participants),
     speedModifiers: Object.fromEntries(raceState.speedModifiers)
-  }, channel);
+  }, channel, streamerId);
 }
 
-function checkRaceCheering(text, client, channel) {
+function checkRaceCheering(text, client, channel, raceState, streamerId) {
   // Check if message mentions any race participant
   const participants = Array.from(raceState.participants);
   
@@ -851,7 +868,7 @@ function checkRaceCheering(text, client, channel) {
       emitOverlay('raceSpeedUpdate', {
         participantId: participantId,
         speedModifier: raceState.speedModifiers.get(participantId)
-      }, channel);
+      }, channel, streamerId);
       
       client.say(channel, `💨 Участник получил ускорение!`).catch(err => logLine(`[bot] say error: ${err.message}`));
       break;
@@ -909,29 +926,20 @@ function finishRace(winnerId, client, channel) {
 }
 
 function getBotClient() {
-  return tmiClient;
+  for (const data of botClients.values()) {
+    if (data.client) {
+      return data.client;
+    }
+  }
+  return null;
 }
 
 function getBotChannel() {
-  logLine(`[bot] getBotChannel: botForUser=${botForUser}`);
-  if (!botForUser) {
-    logLine(`[bot] getBotChannel: no botForUser, returning null`);
-    return null;
+  for (const data of botClients.values()) {
+    if (data?.profile?.login) {
+      return normalizeChannel(data.profile.login);
+    }
   }
-  
-  // botForUser is twitch_user_id, we need to get the login
-  // For now, we'll use a simple approach - get the login from the profile
-  // This is a temporary fix - ideally we should store the login separately
-  const { getUserByTwitchId } = require('../db');
-  const profile = getUserByTwitchId(botForUser);
-  logLine(`[bot] getBotChannel: profile=${profile ? 'found' : 'not found'}, login=${profile?.login}`);
-  if (profile && profile.login) {
-    const channel = normalizeChannel(profile.login);
-    logLine(`[bot] getBotChannel: returning channel=${channel}`);
-    return channel;
-  }
-  
-  logLine(`[bot] getBotChannel: no profile or login, returning null`);
   return null;
 }
 
@@ -2072,6 +2080,6 @@ function finishRacePlan(winnerName, client, channel) {
   }
 }
 
-module.exports = { ensureBotFor, stopBot, status, addActiveAvatar, removeActiveAvatar, finishRace, finishFoodGame, getBotClient, getBotChannel, startRace, startFoodGame, checkFoodGameCommand, checkFoodGameCheering, checkCarrotCollisions, spawnCarrot, joinFoodGame, startFoodGameCountdown, startFoodGameMonitoring, setAvatarTimeoutSeconds, getAvatarTimeoutSeconds, startRacePlan, joinRacePlan, checkRacePlanCommand, checkRacePlanCheering, spawnObstacle, checkRacePlanCollisions, handleRacePlanCollision, finishRacePlan, setAvatarMetrics, Game, racePlanState };
+module.exports = { ensureBotFor, stopBot, status, addActiveAvatar, removeActiveAvatar, finishRace, finishFoodGame, getBotClient, getBotClientFor, getBotChannel, getBotChannelFor, startRace, startFoodGame, checkFoodGameCommand, checkFoodGameCheering, checkCarrotCollisions, spawnCarrot, joinFoodGame, startFoodGameCountdown, startFoodGameMonitoring, setAvatarTimeoutSeconds, getAvatarTimeoutSeconds, startRacePlan, joinRacePlan, checkRacePlanCommand, checkRacePlanCheering, spawnObstacle, checkRacePlanCollisions, handleRacePlanCollision, finishRacePlan, setAvatarMetrics, Game, racePlanState, getStreamerState };
 
 

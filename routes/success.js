@@ -558,6 +558,8 @@ function registerSuccessRoute(app) {
           </div>
         </div>
 
+        
+
         <div class="card">
           <h2>💰 DonationAlerts</h2>
           <div class="actions-grid">
@@ -854,6 +856,8 @@ function registerSuccessRoute(app) {
         btn.disabled = false;
       }
     };
+
+    // (кнопки запуска игр убраны на этой странице)
 
 
     // DonationAlerts connection

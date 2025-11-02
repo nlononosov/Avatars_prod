@@ -20,6 +20,7 @@ const { registerDonationAlertsRoute } = require('./routes/donationalerts');
 const { registerDonationAlertsAuthRoutes } = require('./routes/donationalerts-auth');
 const { registerDonationAlertsConnectRoutes } = require('./routes/donationalerts-connect');
 const { registerDebugRoutes } = require('./routes/debug');
+const { registerGameRoutes } = require('./routes/games');
 const { overlayEventsHandler } = require('./lib/bus');
 const { handleWebhook, validateWebhook } = require('./lib/yookassa');
 const { initializeUsernameCache } = require('./lib/donationalerts');
@@ -64,6 +65,7 @@ registerDonationAlertsRoute(app);
 registerDonationAlertsAuthRoutes(app);
 registerDonationAlertsConnectRoutes(app);
 registerDebugRoutes(app);
+registerGameRoutes(app);
 
 // API для метрик хитбокса аватаров - DEPRECATED: requires streamerId for multi-bot
 // app.post('/api/plane-race/avatar-metrics', ...)

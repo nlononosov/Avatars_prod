@@ -138,7 +138,7 @@ function registerMyChatRoute(app) {
   });
 
   // API для запуска игры
-  app.post('/api/games/start-race', (req, res) => {
+  app.post('/api/games/start-race', async (req, res) => {
     const streamerId = req.cookies.uid;
     if (!streamerId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -169,11 +169,12 @@ function registerMyChatRoute(app) {
       }
 
       // Импортируем функции бота для запуска гонки
-      const { startRace, getBotClient, getBotChannel } = require('../services/bot');
-      
+      const { ensureBotFor, startRace, getBotClientFor, getBotChannelFor, getStreamerState } = require('../services/bot');
+      // Убеждаемся, что бот запущен
+      try { await ensureBotFor(streamerId); } catch (_) {}
       // Получаем активного бота и канал
-      const client = getBotClient();
-      const channel = getBotChannel();
+      const client = getBotClientFor(streamerId);
+      const channel = getBotChannelFor(streamerId);
       
       console.log(`[my-chat] Bot client:`, client ? 'active' : 'null');
       console.log(`[my-chat] Bot channel:`, channel);
@@ -186,7 +187,8 @@ function registerMyChatRoute(app) {
       
       // Запускаем гонку с настройками
       console.log(`[my-chat] Starting race with client and channel:`, channel);
-      startRace(client, channel, { minParticipants, maxParticipants, registrationTime });
+      const { raceState } = getStreamerState(streamerId);
+      startRace(streamerId, client, channel, raceState, { minParticipants, maxParticipants, registrationTime });
       
       res.json({ success: true, message: 'Гонка запущена!' });
     } catch (error) {
@@ -196,7 +198,7 @@ function registerMyChatRoute(app) {
   });
 
   // API для запуска игры "Собери еду"
-  app.post('/api/games/start-food', (req, res) => {
+  app.post('/api/games/start-food', async (req, res) => {
     const streamerId = req.cookies.uid;
     if (!streamerId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -227,11 +229,10 @@ function registerMyChatRoute(app) {
       }
 
       // Импортируем функции бота для запуска игры
-      const { startFoodGame, getBotClient, getBotChannel } = require('../services/bot');
-      
-      // Получаем активного бота и канал
-      const client = getBotClient();
-      const channel = getBotChannel();
+      const { ensureBotFor, startFoodGame, getBotClientFor, getBotChannelFor } = require('../services/bot');
+      try { await ensureBotFor(streamerId); } catch (_) {}
+      const client = getBotClientFor(streamerId);
+      const channel = getBotChannelFor(streamerId);
       
       console.log(`[my-chat] Bot client:`, client ? 'active' : 'null');
       console.log(`[my-chat] Bot channel:`, channel);
@@ -254,7 +255,7 @@ function registerMyChatRoute(app) {
   });
 
   // API для запуска игры "Гонка на самолетах"
-  app.post('/api/games/start-race-plan', (req, res) => {
+  app.post('/api/games/start-race-plan', async (req, res) => {
     const streamerId = req.cookies.uid;
     if (!streamerId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -285,11 +286,10 @@ function registerMyChatRoute(app) {
       }
 
       // Импортируем функции бота для запуска игры
-      const { startRacePlan, getBotClient, getBotChannel } = require('../services/bot');
-      
-      // Получаем активного бота и канал
-      const client = getBotClient();
-      const channel = getBotChannel();
+      const { ensureBotFor, startRacePlan, getBotClientFor, getBotChannelFor } = require('../services/bot');
+      try { await ensureBotFor(streamerId); } catch (_) {}
+      const client = getBotClientFor(streamerId);
+      const channel = getBotChannelFor(streamerId);
       
       console.log(`[my-chat] Bot client:`, client ? 'active' : 'null');
       console.log(`[my-chat] Bot channel:`, channel);
@@ -1306,7 +1306,7 @@ function registerMyChatRoute(app) {
         const maxParticipants = parseInt(document.getElementById('maxParticipants').value);
         const registrationTime = parseInt(document.getElementById('registrationTime').value);
         
-        const response = await fetch('/api/games/start-race', {
+        const response = await fetch('/api/game/race/start', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1348,7 +1348,7 @@ function registerMyChatRoute(app) {
         const maxParticipants = parseInt(document.getElementById('maxParticipants').value);
         const registrationTime = parseInt(document.getElementById('registrationTime').value);
         
-        const response = await fetch('/api/games/start-food', {
+        const response = await fetch('/api/game/food/start', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
