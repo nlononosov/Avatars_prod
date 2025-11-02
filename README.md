@@ -10,10 +10,12 @@
    ```bash
    npm install
    ```
-3. Run:
+3. Provide infrastructure services:
+   - Redis 6+ for distributed event bus and donation polling locks (`REDIS_URL`)
+4. Run:
    ```bash
    npm run start
    ```
-4. Open `http://localhost:3000` and click "Вход".
+5. Open `http://localhost:3000` and click "Вход".
 
 Tokens and user are saved into `data.sqlite` for later chat access.
