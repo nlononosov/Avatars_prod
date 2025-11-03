@@ -304,6 +304,11 @@ async function ensureBotFor(uid) {
       logLine(`[bot] Error loading timeout from DB: ${error.message}`);
     }
     
+    // Сохраняем состояние бота в Redis
+    saveBotStateToRedis(uid).catch(err => {
+      logLine(`[bot] Failed to save bot state to Redis: ${err.message}`);
+    });
+    
     startAvatarTimeoutChecker(uid);
     
     // Подписываемся на события bus для отслеживания аватаров из донатов
@@ -2080,6 +2085,97 @@ function finishRacePlan(winnerName, client, channel) {
   }
 }
 
-module.exports = { ensureBotFor, stopBot, status, addActiveAvatar, removeActiveAvatar, finishRace, finishFoodGame, getBotClient, getBotClientFor, getBotChannel, getBotChannelFor, startRace, startFoodGame, checkFoodGameCommand, checkFoodGameCheering, checkCarrotCollisions, spawnCarrot, joinFoodGame, startFoodGameCountdown, startFoodGameMonitoring, setAvatarTimeoutSeconds, getAvatarTimeoutSeconds, startRacePlan, joinRacePlan, checkRacePlanCommand, checkRacePlanCheering, spawnObstacle, checkRacePlanCollisions, handleRacePlanCollision, finishRacePlan, setAvatarMetrics, Game, racePlanState, getStreamerState };
+// Восстановление ботов при старте сервера из Redis
+async function restoreBotsFromRedis() {
+  try {
+    const { stateManager } = require('../lib/state-redis');
+    // Используем синхронный модуль, так как getAllStreamers синхронная
+    const db = require('../db');
+    
+    const streamers = db.getAllStreamers();
+    if (!streamers || streamers.length === 0) {
+      logLine('[bot] No streamers found in database for restoration');
+      return;
+    }
+
+    logLine(`[bot] Restoring bots for ${streamers.length} streamers from Redis...`);
+    
+    let restored = 0;
+    for (const streamer of streamers) {
+      const streamerId = streamer.streamer_twitch_id;
+      
+      try {
+        // Проверяем состояние бота в Redis
+        const botState = await stateManager.getBotState(streamerId);
+        
+        if (botState && botState.active) {
+          // Восстанавливаем состояние
+          const localState = getStreamerState(streamerId);
+          if (botState.avatarTimeoutSeconds) {
+            localState.avatarTimeoutSeconds = botState.avatarTimeoutSeconds;
+          }
+          
+          // Восстанавливаем активные аватары
+          const activeAvatars = await stateManager.getActiveAvatars(streamerId);
+          for (const userId of activeAvatars) {
+            localState.activeAvatars.add(userId);
+            
+            // Восстанавливаем активность
+            const activity = await stateManager.getAvatarActivity(streamerId, userId);
+            if (activity) {
+              localState.avatarLastActivity.set(userId, activity);
+            }
+            
+            // Восстанавливаем состояние аватара
+            const avatarState = await stateManager.getAvatarState(streamerId, userId);
+            if (avatarState) {
+              localState.avatarStates.set(userId, avatarState);
+            }
+          }
+          
+          // Переподключаем бота к Twitch
+          try {
+            await ensureBotFor(streamerId);
+            restored++;
+            logLine(`[bot] Restored bot for streamer ${streamerId}`);
+          } catch (error) {
+            logLine(`[bot] Failed to restore bot for streamer ${streamerId}: ${error.message}`);
+          }
+        }
+      } catch (error) {
+        logLine(`[bot] Error restoring bot for streamer ${streamerId}: ${error.message}`);
+      }
+    }
+    
+    logLine(`[bot] Bot restoration completed: ${restored}/${streamers.length} bots restored`);
+  } catch (error) {
+    logLine(`[bot] Error during bot restoration: ${error.message}`);
+  }
+}
+
+// Сохранение состояния бота в Redis
+async function saveBotStateToRedis(streamerId) {
+  try {
+    const { stateManager } = require('../lib/state-redis');
+    const botData = botClients.get(streamerId);
+    
+    if (!botData) {
+      return;
+    }
+    
+    const state = getStreamerState(streamerId);
+    const botState = {
+      active: botData.client && botData.ready,
+      avatarTimeoutSeconds: state.avatarTimeoutSeconds,
+      lastUpdate: Date.now()
+    };
+    
+    await stateManager.setBotState(streamerId, botState);
+  } catch (error) {
+    logLine(`[bot] Error saving bot state to Redis for ${streamerId}: ${error.message}`);
+  }
+}
+
+module.exports = { ensureBotFor, stopBot, status, addActiveAvatar, removeActiveAvatar, finishRace, finishFoodGame, getBotClient, getBotClientFor, getBotChannel, getBotChannelFor, startRace, startFoodGame, checkFoodGameCommand, checkFoodGameCheering, checkCarrotCollisions, spawnCarrot, joinFoodGame, startFoodGameCountdown, startFoodGameMonitoring, setAvatarTimeoutSeconds, getAvatarTimeoutSeconds, startRacePlan, joinRacePlan, checkRacePlanCommand, checkRacePlanCheering, spawnObstacle, checkRacePlanCollisions, handleRacePlanCollision, finishRacePlan, setAvatarMetrics, Game, racePlanState, getStreamerState, restoreBotsFromRedis, saveBotStateToRedis };
 
 
