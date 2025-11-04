@@ -2212,12 +2212,8 @@ async function restoreBotsFromRedis() {
             continue;
           }
           
-          // Если ownerProcessId не начинается с текущего PID, но есть запись - очищаем (старый процесс умер)
-          if (ownerProcessId && !ownerProcessId.startsWith(currentProcessId)) {
-            logLine(`[bot] Clearing stale bot state for streamer ${streamerId} (old process: ${ownerProcessId})`);
-            await stateManager.deleteBotState(streamerId).catch(() => {});
-            continue;
-          }
+          // Если мы здесь, значит бот должен быть активен в текущем процессе
+          // Продолжаем восстановление
         }
         
         if (botState && botState.active) {
