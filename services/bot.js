@@ -309,13 +309,13 @@ async function ensureBotFor(uid) {
     const recheckBotState = await stateManager.getBotState(uid);
     if (recheckBotState && recheckBotState.active && recheckBotState.ownerProcessId) {
       logLine(`[bot] Bot for streamer ${uid} was created by another process while waiting for lock`);
-      await lock.release();
+      await lock.unlock();
       throw new Error(`Bot is already active in another process`);
     }
 
     let profile = getUserByTwitchId(uid);
     if (!profile) {
-      await lock.release();
+      await lock.unlock();
       throw new Error('User not found in DB');
     }
 
@@ -325,7 +325,7 @@ async function ensureBotFor(uid) {
       try {
         profile = await refreshToken(profile);
       } catch (error) {
-        await lock.release();
+        await lock.unlock();
         throw new Error(`Token refresh failed: ${error.message}`);
       }
     }
@@ -372,8 +372,8 @@ async function ensureBotFor(uid) {
     
     // Освобождаем блокировку после успешного создания
     if (lock) {
-      await lock.release().catch(err => {
-        logLine(`[bot] Failed to release lock: ${err.message}`);
+      await lock.unlock().catch(err => {
+        logLine(`[bot] Failed to unlock: ${err.message}`);
       });
     }
     
@@ -418,7 +418,7 @@ async function ensureBotFor(uid) {
       }
       // Очищаем состояние при ошибке аутентификации
       if (lock) {
-        await lock.release().catch(() => {});
+        await lock.unlock().catch(() => {});
       }
       await stateManager.deleteBotState(uid).catch(() => {});
     }
@@ -747,7 +747,7 @@ async function ensureBotFor(uid) {
     botClients.delete(uid);
     // Освобождаем блокировку при ошибке
     if (lock) {
-      await lock.release().catch(() => {});
+      await lock.unlock().catch(() => {});
     }
     // Очищаем состояние бота в Redis
     await stateManager.deleteBotState(uid).catch(() => {});
