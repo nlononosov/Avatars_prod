@@ -2270,6 +2270,89 @@ async function saveBotStateToRedis(streamerId, processId) {
   }
 }
 
-module.exports = { ensureBotFor, stopBot, status, addActiveAvatar, removeActiveAvatar, finishRace, finishFoodGame, getBotClient, getBotClientFor, getBotChannel, getBotChannelFor, startRace, startFoodGame, checkFoodGameCommand, checkFoodGameCheering, checkCarrotCollisions, spawnCarrot, joinFoodGame, startFoodGameCountdown, startFoodGameMonitoring, setAvatarTimeoutSeconds, getAvatarTimeoutSeconds, startRacePlan, joinRacePlan, checkRacePlanCommand, checkRacePlanCheering, spawnObstacle, checkRacePlanCollisions, handleRacePlanCollision, finishRacePlan, setAvatarMetrics, getStreamerState, restoreBotsFromRedis, saveBotStateToRedis };
+// Watchdog для автоматического мониторинга и восстановления ботов
+let botWatchdogInterval = null;
+
+async function checkBotsHealth() {
+  try {
+    const { stateManager } = require('../lib/state-redis');
+    const db = require('../db');
+    
+    const streamers = db.getAllStreamers();
+    if (!streamers || streamers.length === 0) {
+      return;
+    }
+    
+    for (const streamer of streamers) {
+      const streamerId = streamer.streamer_twitch_id;
+      const botData = botClients.get(streamerId);
+      const botState = await stateManager.getBotState(streamerId);
+      
+      // Если бот должен быть активен (по Redis), но локально не подключен
+      if (botState && botState.active) {
+        const isLocalActive = botData && botData.client && botData.ready;
+        const currentProcessId = `${process.pid}`;
+        const isOwner = botState.ownerProcessId && botState.ownerProcessId.startsWith(currentProcessId);
+        
+        // Если мы владелец бота, но он упал - переподключаем
+        if (isOwner && !isLocalActive) {
+          logLine(`[bot watchdog] Bot for streamer ${streamerId} is down, attempting to restore...`);
+          try {
+            await ensureBotFor(streamerId);
+            logLine(`[bot watchdog] Successfully restored bot for streamer ${streamerId}`);
+          } catch (error) {
+            logLine(`[bot watchdog] Failed to restore bot for streamer ${streamerId}: ${error.message}`);
+            // Если не удалось восстановить - очищаем состояние в Redis
+            if (error.message.includes('already active') || error.message.includes('another process')) {
+              // Бот перехвачен другим процессом - это нормально
+            } else {
+              // Реальная ошибка - очищаем состояние
+              await stateManager.deleteBotState(streamerId).catch(() => {});
+            }
+          }
+        }
+      }
+      
+      // Если бот локально активен, обновляем timestamp в Redis
+      if (botData && botData.client && botData.ready) {
+        await saveBotStateToRedis(streamerId, botData.processId).catch(() => {});
+      }
+    }
+  } catch (error) {
+    logLine(`[bot watchdog] Error checking bots health: ${error.message}`);
+  }
+}
+
+function startBotWatchdog() {
+  if (botWatchdogInterval) {
+    clearInterval(botWatchdogInterval);
+  }
+  
+  // Проверяем здоровье ботов каждые 30 секунд
+  botWatchdogInterval = setInterval(() => {
+    checkBotsHealth().catch(error => {
+      logLine(`[bot watchdog] Unhandled error: ${error.message}`);
+    });
+  }, 30000);
+  
+  // Первая проверка через 10 секунд после старта
+  setTimeout(() => {
+    checkBotsHealth().catch(error => {
+      logLine(`[bot watchdog] Initial check error: ${error.message}`);
+    });
+  }, 10000);
+  
+  logLine('[bot watchdog] Bot watchdog started');
+}
+
+function stopBotWatchdog() {
+  if (botWatchdogInterval) {
+    clearInterval(botWatchdogInterval);
+    botWatchdogInterval = null;
+    logLine('[bot watchdog] Bot watchdog stopped');
+  }
+}
+
+module.exports = { ensureBotFor, stopBot, status, addActiveAvatar, removeActiveAvatar, finishRace, finishFoodGame, getBotClient, getBotClientFor, getBotChannel, getBotChannelFor, startRace, startFoodGame, checkFoodGameCommand, checkFoodGameCheering, checkCarrotCollisions, spawnCarrot, joinFoodGame, startFoodGameCountdown, startFoodGameMonitoring, setAvatarTimeoutSeconds, getAvatarTimeoutSeconds, startRacePlan, joinRacePlan, checkRacePlanCommand, checkRacePlanCheering, spawnObstacle, checkRacePlanCollisions, handleRacePlanCollision, finishRacePlan, setAvatarMetrics, getStreamerState, restoreBotsFromRedis, saveBotStateToRedis, startBotWatchdog, stopBotWatchdog };
 
 

@@ -1,20 +1,84 @@
 const { getAuthUrl, exchangeCodeForToken, getUserInfo } = require('../lib/donationalerts-oauth');
 const { saveOrUpdateUser, getUserByTwitchId, saveOrUpdateAvatar } = require('../db');
+const { getClient } = require('../lib/redis');
 
-// Store state for CSRF protection
-const stateStore = new Map();
+// State хранится в Redis для поддержки горизонтального масштабирования
+const STATE_TTL = 5 * 60; // 5 минут в секундах
+const STATE_PREFIX = 'oauth:state:';
+
+async function storeState(state, userId) {
+  try {
+    const client = await getClient();
+    if (client && client.status === 'ready') {
+      await client.setex(
+        `${STATE_PREFIX}${state}`,
+        STATE_TTL,
+        JSON.stringify({
+          timestamp: Date.now(),
+          userId: userId
+        })
+      );
+      return true;
+    }
+  } catch (error) {
+    console.error('[DA OAuth] Failed to store state in Redis:', error.message);
+  }
+  // Fallback на локальное хранилище если Redis недоступен (не рекомендуется для продакшена)
+  if (!global.oauthStateStore) {
+    global.oauthStateStore = new Map();
+  }
+  global.oauthStateStore.set(state, {
+    timestamp: Date.now(),
+    userId: userId
+  });
+  return false;
+}
+
+async function getState(state) {
+  try {
+    const client = await getClient();
+    if (client && client.status === 'ready') {
+      const data = await client.get(`${STATE_PREFIX}${state}`);
+      if (data) {
+        return JSON.parse(data);
+      }
+      return null;
+    }
+  } catch (error) {
+    console.error('[DA OAuth] Failed to get state from Redis:', error.message);
+  }
+  // Fallback на локальное хранилище
+  if (global.oauthStateStore) {
+    return global.oauthStateStore.get(state) || null;
+  }
+  return null;
+}
+
+async function deleteState(state) {
+  try {
+    const client = await getClient();
+    if (client && client.status === 'ready') {
+      await client.del(`${STATE_PREFIX}${state}`);
+      return true;
+    }
+  } catch (error) {
+    console.error('[DA OAuth] Failed to delete state from Redis:', error.message);
+  }
+  // Fallback на локальное хранилище
+  if (global.oauthStateStore) {
+    global.oauthStateStore.delete(state);
+  }
+  return false;
+}
 
 function registerDonationAlertsAuthRoutes(app) {
   // Start DonationAlerts OAuth flow
-  app.get('/auth/donationalerts', (req, res) => {
+  app.get('/auth/donationalerts', async (req, res) => {
     try {
       const { url, state } = getAuthUrl();
       
-      // Store state for verification
-      stateStore.set(state, {
-        timestamp: Date.now(),
-        userId: req.cookies.uid // Store current user ID if any
-      });
+      // Store state for verification in Redis
+      await storeState(state, req.cookies.uid);
       
       console.log(`[DA OAuth] Starting OAuth flow for user ${req.cookies.uid || 'anonymous'}`);
       res.redirect(url);
@@ -39,8 +103,8 @@ function registerDonationAlertsAuthRoutes(app) {
         return res.redirect('/?error=invalid_request');
       }
       
-      // Verify state
-      const storedState = stateStore.get(state);
+      // Verify state from Redis
+      const storedState = await getState(state);
       if (!storedState) {
         console.error('[DA OAuth] Invalid state');
         return res.redirect('/?error=invalid_state');
@@ -49,12 +113,12 @@ function registerDonationAlertsAuthRoutes(app) {
       // Check if state is not too old (5 minutes)
       if (Date.now() - storedState.timestamp > 5 * 60 * 1000) {
         console.error('[DA OAuth] State expired');
-        stateStore.delete(state);
+        await deleteState(state);
         return res.redirect('/?error=state_expired');
       }
       
       // Clean up state
-      stateStore.delete(state);
+      await deleteState(state);
       
       console.log(`[DA OAuth] Exchanging code for token`);
       

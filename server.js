@@ -25,6 +25,8 @@ const { overlayEventsHandler } = require('./lib/bus');
 const { registerMetrics } = require('./lib/metrics');
 const { handleWebhook, validateWebhook } = require('./lib/yookassa');
 const { initializeUsernameCache } = require('./lib/donationalerts');
+const { restoreBotsFromRedis } = require('./services/bot');
+const { getClient, getHealthStatus } = require('./lib/redis');
 
 const app = express();
 app.use(cors());
@@ -76,10 +78,69 @@ registerGameRoutes(app);
 // Initialize DonationAlerts username cache
 initializeUsernameCache();
 
-// Start DonationAlerts polling
-const { startPolling } = require('./lib/donationalerts-poll');
-startPolling();
+// Проверка Redis при старте (для продакшена)
+async function checkRedisConnection() {
+  const REDIS_REQUIRED = process.env.REDIS_REQUIRED === 'true';
+  
+  if (REDIS_REQUIRED) {
+    try {
+      const client = await getClient();
+      await client.ping();
+      console.log('[Server] Redis connection verified');
+      return true;
+    } catch (error) {
+      console.error('[Server] CRITICAL: Redis is required but connection failed:', error.message);
+      process.exit(1);
+    }
+  } else {
+    // Проверяем, но не падаем
+    try {
+      const health = getHealthStatus();
+      if (health.disabled) {
+        console.warn('[Server] WARNING: Redis is unavailable, some features may not work correctly');
+      } else {
+        console.log('[Server] Redis connection available');
+      }
+    } catch (error) {
+      console.warn('[Server] WARNING: Could not check Redis status:', error.message);
+    }
+  }
+}
 
-app.listen(PORT, () => {
-  console.log(`Server listening on ${BASE_URL}`);
+// Автоматическое восстановление ботов при старте
+async function initializeBots() {
+  try {
+    console.log('[Server] Restoring bots from Redis...');
+    await restoreBotsFromRedis();
+    console.log('[Server] Bot restoration completed');
+    
+    // Запускаем watchdog для автоматического мониторинга ботов
+    const { startBotWatchdog } = require('./services/bot');
+    startBotWatchdog();
+  } catch (error) {
+    console.error('[Server] Error restoring bots:', error.message);
+    // Не падаем при ошибке восстановления, просто логируем
+  }
+}
+
+// Инициализация приложения
+async function startServer() {
+  // Проверяем Redis перед запуском
+  await checkRedisConnection();
+  
+  // Восстанавливаем ботов
+  await initializeBots();
+  
+  // Start DonationAlerts polling
+  const { startPolling } = require('./lib/donationalerts-poll');
+  startPolling();
+  
+  app.listen(PORT, () => {
+    console.log(`Server listening on ${BASE_URL}`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error('[Server] Failed to start server:', error);
+  process.exit(1);
 });
