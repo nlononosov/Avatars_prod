@@ -51,7 +51,7 @@ function registerGameRoutes(app) {
         maxParticipants: Number(req.body?.maxParticipants) || 8,
         registrationTime: Number(req.body?.registrationTime) || 10
       };
-      startRacePlan(client, channel, settings);
+      startRacePlan(uid, client, channel, settings);
       return res.json({ success: true, message: 'Гонка на самолетах объявлена в чате' });
     } catch (error) {
       console.error('[games] plane race start error:', error);
@@ -80,7 +80,7 @@ function registerGameRoutes(app) {
         maxParticipants: Number(req.body?.maxParticipants) || 10,
         registrationTime: Number(req.body?.registrationTime) || 10
       };
-      startFoodGame(client, channel, settings);
+      startFoodGame(uid, client, channel, settings);
       return res.json({ success: true, message: 'Игра объявлена в чате' });
     } catch (error) {
       console.error('[games] food start error:', error);

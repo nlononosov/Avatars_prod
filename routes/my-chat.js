@@ -245,7 +245,7 @@ function registerMyChatRoute(app) {
       
       // Запускаем игру с настройками
       console.log(`[my-chat] Starting food game with client and channel:`, channel);
-      startFoodGame(client, channel, { minParticipants, maxParticipants, registrationTime });
+      startFoodGame(streamerId, client, channel, { minParticipants, maxParticipants, registrationTime });
       
       res.json({ success: true, message: 'Игра "Собери еду" запущена!' });
     } catch (error) {
@@ -302,7 +302,7 @@ function registerMyChatRoute(app) {
       
       // Запускаем игру с настройками
       console.log(`[my-chat] Starting race plan with client and channel:`, channel);
-      startRacePlan(client, channel, { minParticipants, maxParticipants, registrationTime });
+      startRacePlan(streamerId, client, channel, { minParticipants, maxParticipants, registrationTime });
       
       res.json({ success: true, message: 'Игра "Гонка на самолетах" запущена!' });
     } catch (error) {

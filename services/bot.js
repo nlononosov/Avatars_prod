@@ -77,6 +77,14 @@ function getStreamerState(streamerId) {
   }
   return botClients.get(streamerId);
 }
+
+function getPlaneGameState(streamerId) {
+  const state = getStreamerState(streamerId);
+  return {
+    racePlanState: state.racePlanState,
+    Game: state.Game
+  };
+}
 // ==================== END MULTI-BOT MANAGER ====================
 
 // Помощник для отправки событий в канал стримера
@@ -453,14 +461,14 @@ async function ensureBotFor(uid) {
 
     // Check for food game registration
     if (text === '+' && states.foodGameState.isActive && !states.foodGameState.gameStarted) {
-      joinFoodGame(userId, displayName, client, channel, states.foodGameState);
+      joinFoodGame(uid, userId, displayName, client, channel);
       return;
     }
 
     // Check for food game commands
     if (states.foodGameState.isActive && states.foodGameState.gameStarted && !states.foodGameState.gameFinished) {
-      checkFoodGameCommand(text, userId, displayName, client, channel, states.foodGameState);
-      checkFoodGameCheering(text, client, channel, states.foodGameState);
+      checkFoodGameCommand(uid, text, userId, displayName, client, channel);
+      checkFoodGameCheering(uid, text, client, channel);
     }
 
     // Race plan command
@@ -469,20 +477,20 @@ async function ensureBotFor(uid) {
         client.say(channel, '✈️ Гонка на самолетах уже идет! Дождитесь завершения.').catch(err => logLine(`[bot] say error: ${err.message}`));
         return;
       }
-      startRacePlan(uid, client, channel, states.racePlanState, states.Game);
+      startRacePlan(uid, client, channel);
       return;
     }
 
     // Check for race plan registration
     if (text === '+' && states.racePlanState.isActive && !states.racePlanState.gameStarted) {
-      joinRacePlan(userId, displayName, client, channel, states.racePlanState, states.Game);
+      joinRacePlan(uid, userId, displayName, client, channel);
       return;
     }
 
     // Check for race plan commands
     if (states.racePlanState.isActive && states.racePlanState.gameStarted && !states.racePlanState.gameFinished) {
-      checkRacePlanCommand(text, userId, displayName, client, channel, states.racePlanState, states.Game);
-      checkRacePlanCheering(text, client, channel, states.racePlanState, uid);
+      checkRacePlanCommand(uid, text, userId, displayName, client, channel);
+      checkRacePlanCheering(uid, text, client, channel);
     }
 
 
@@ -496,7 +504,7 @@ async function ensureBotFor(uid) {
         }
         const oldLane = p.lane ?? 1;
         p.lane = clampLane(oldLane - 1);
-        emitLevelUpdate(userId, p.lane, client, channel, uid); 
+        emitLevelUpdate(uid, userId, p.lane, client, channel);
         return;
       }
       if (DOWN_WORDS.has(text)) {
@@ -507,7 +515,7 @@ async function ensureBotFor(uid) {
         }
         const oldLane = p.lane ?? 1;
         p.lane = clampLane(oldLane + 1);
-        emitLevelUpdate(userId, p.lane, client, channel, uid); 
+        emitLevelUpdate(uid, userId, p.lane, client, channel);
         return;
       }
     }
@@ -881,23 +889,6 @@ function checkRaceCheering(text, client, channel, raceState, streamerId) {
   }
 }
 
-function joinFoodGame(userId, displayName, client, channel) {
-  if (foodGameState.participants.has(userId)) {
-    client.say(channel, `@${displayName} вы уже участвуете в игре!`).catch(err => logLine(`[bot] say error: ${err.message}`));
-    return;
-  }
-
-  foodGameState.participants.add(userId);
-  foodGameState.participantNames.set(userId, displayName);
-  foodGameState.scores.set(userId, 0);
-  foodGameState.directions.set(userId, 1); // Start moving right
-  foodGameState.speedModifiers.set(userId, 0); // No speed modifier initially
-
-  const participantCount = foodGameState.participants.size;
-  client.say(channel, `🥕 @${displayName} присоединился к игре! Участников: ${participantCount}`).catch(err => logLine(`[bot] say error: ${err.message}`));
-  logLine(`[bot] User ${displayName} (${userId}) joined food game. Total participants: ${participantCount}`);
-}
-
 function finishRace(winnerId, client, channel) {
   if (raceState.raceFinished) return;
   
@@ -948,22 +939,6 @@ function getBotChannel() {
   return null;
 }
 
-// Состояние игры "Собери еду"
-const foodGameState = {
-  isActive: false,
-  participants: new Set(),
-  participantNames: new Map(),
-  scores: new Map(), // userId -> score
-  directions: new Map(), // userId -> direction (1 = right, -1 = left)
-  speedModifiers: new Map(), // userId -> speed modifier
-  carrots: [], // Массив падающих морковок
-  gameStarted: false,
-  gameFinished: false,
-  startTime: null,
-  winner: null
-};
-
-
 // === Константы команд ===
 const UP_WORDS  = new Set(['верх','вверх','up','u','w','↑']);
 const DOWN_WORDS= new Set(['низ','вниз','down','d','s','↓']);
@@ -986,113 +961,94 @@ function sweptPass(prevX, currX, c2, halfSum) {
 // Метрики хитбокса аватаров (половины размеров, поступают с клиента)
 const AvatarMetrics = new Map(); // userId -> { halfW, halfH }
 
-// Пример структуры состояния
-const Game = {
-  isActive: false,     // true со старта отсчёта и до конца гонки на самолетах
-  gameFinished: false,
-  players: new Map(),  // id -> { lane:1, lives:3, out:false, ... }
-  obstacles: [],       // [{ id, lane, x, speed, width, hit, type }]
-  lanes: [0,1,2],
-  maxLives: 3,
-};
-
 // Вспомогательно
 function clampLane(l) { return Math.max(0, Math.min(2, l|0)); }
 
 function setAvatarMetrics(userId, halfW, halfH) {
   AvatarMetrics.set(userId, { halfW, halfH });
 }
-function emitLevelUpdate(userId, level, client, channel) {
-  // на всякий случай синхронизируем server state
+function emitLevelUpdate(streamerId, userId, level, client, channel) {
+  const { racePlanState } = getPlaneGameState(streamerId);
   racePlanState.levels.set(userId, level);
-  emitOverlay('racePlanLevelUpdate', { userId, level }, channel);
+  emitOverlay('racePlanLevelUpdate', { userId, level }, channel, streamerId);
 }
 
-function spawnGameObstacle(channel) {
+function spawnGameObstacle(streamerId, channel) {
+  const { Game, racePlanState } = getPlaneGameState(streamerId);
   if (!Game.isActive || Game.gameFinished) return;
   
-  const id = `obs_${Date.now()}_${Math.random().toString(16).slice(2,6)}`;
-  const lane = LANES[randInt(0, 2)]; // случайная дорожка
-  const speed = randInt(6, 10); // пикс/тик
-  const xStart = 1200; // стартовое X справа за экраном
-  const width = 80; // для хитбокса
+  const id = `obs_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`;
+  const lane = LANES[randInt(0, 2)];
+  const speed = randInt(6, 10);
+  const xStart = 1200;
+  const width = 80;
   const type = OBSTACLE_TYPES[randInt(0, OBSTACLE_TYPES.length - 1)];
 
   const obs = { id, lane, x: xStart, speed, width, hit: false, type };
   Game.obstacles.push(obs);
+  racePlanState.obstacles.push(obs);
 
-  logLine(`[bot] Spawning obstacle ${id} in lane ${lane} (type: ${type})`);
-  
-  // говорим оверлею создать DOM-элемент, lane передаём обязательно
-  emitOverlay('racePlanObstacleSpawn', { id, lane, x: xStart, type }, channel);
+  logLine(`[bot] Spawning obstacle ${id} in lane ${lane} (type: ${type}) for streamer ${streamerId}`);
+
+  emitOverlay('racePlanObstacleSpawn', { id, lane, x: xStart, type }, channel, streamerId);
 }
 
 
 
-function serverTick() {
-  logLine(`[bot] serverTick called: Game.isActive=${Game.isActive}, Game.gameFinished=${Game.gameFinished}`);
+function serverTick(streamerId) {
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
+  logLine(`[bot] serverTick called for streamer ${streamerId}: Game.isActive=${Game.isActive}, Game.gameFinished=${Game.gameFinished}`);
   if (!Game.isActive || Game.gameFinished) {
-    logLine(`[bot] serverTick early return due to flags`);
+    logLine(`[bot] serverTick early return due to flags for streamer ${streamerId}`);
     return;
   }
-  
+
   const now = Date.now();
-  const dt = Math.min(200, now - (serverTick.lastTs || now)); // защита от лагов
-  serverTick.lastTs = now;
+  const lastTs = Game.lastTickTs || now;
+  const dt = Math.min(200, now - lastTs);
+  Game.lastTickTs = now;
 
-  logLine(`[bot] serverTick: dt=${dt}ms, players=${Game.players.size}, obstacles=${Game.obstacles.length}`);
+  logLine(`[bot] serverTick for streamer ${streamerId}: dt=${dt}ms, players=${Game.players.size}, obstacles=${Game.obstacles.length}`);
 
-  // Константы движения
-  const AVATAR_SPEED = 20; // px/сек (уменьшено в 4 раза)
-  const OBSTACLE_SPEED = 180; // px/сек
-  
-  // Двигаем всех игроков
+  const AVATAR_SPEED = 20;
+  const OBSTACLE_SPEED = 180;
+
   Game.players.forEach((p, id) => {
     if (p.out || p.lives <= 0) return;
-    p.prevX = p.x; // сохраняем предыдущую позицию для swept-test
-    p.x += AVATAR_SPEED * (dt / 1000); // движение вправо
-    logLine(`[bot] Player ${id} moved: x=${p.x.toFixed(1)}`);
+    p.prevX = p.x;
+    p.x += AVATAR_SPEED * (dt / 1000);
+    logLine(`[bot] Player ${id} moved: x=${p.x.toFixed(1)} (streamer ${streamerId})`);
   });
 
-  // Спавним препятствия
-  maybeSpawnObstacle(now);
+  maybeSpawnObstacle(streamerId, now);
 
-  // Двигаем препятствия
   Game.obstacles.forEach(o => {
-    o.x -= OBSTACLE_SPEED * (dt / 1000); // движение влево
+    o.x -= OBSTACLE_SPEED * (dt / 1000);
   });
 
-  // Проверяем коллизии
-  handleGameCollisions();
-  
-  // Проверяем финишную линию
-  checkFinishLine();
-  
-  // Удаляем препятствия за экраном
+  handleGameCollisions(streamerId);
+  checkFinishLine(streamerId);
+
   Game.obstacles = Game.obstacles.filter(o => o.x + (o.width ?? 80) > 0);
-  
-  // Рассылаем состояние
-  broadcastState();
+
+  broadcastState(streamerId);
 }
 
-function checkFinishLine() {
-  if (Game.gameFinished) return; // Игра уже завершена
-  
-  // Используем динамическую ширину трека, обновляемую с клиента
-  const FINISH_LINE = racePlanState.trackWidth - 50; // Правая граница минус отступ
-  
-  // Проверяем, есть ли живые игроки
+function checkFinishLine(streamerId) {
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
+  if (Game.gameFinished) return;
+
+  const FINISH_LINE = racePlanState.trackWidth - 50;
   let alivePlayers = 0;
   let winner = null;
   let maxX = 0;
-  
+
   Game.players.forEach((p, id) => {
-    if (p.out || p.lives <= 0) return; // Пропускаем выбывших игроков
-    
+    if (p.out || p.lives <= 0) return;
+
     alivePlayers++;
-    
-    // Проверяем пересечение правого края аватара с финишной линией
-    const avatarWidth = 40; // примерная ширина аватара
+
+    const avatarWidth = 40;
     if (p.x + avatarWidth >= FINISH_LINE) {
       if (!winner || p.x > maxX) {
         winner = id;
@@ -1100,77 +1056,67 @@ function checkFinishLine() {
       }
     }
   });
-  
-  // Если нет живых игроков - игра заканчивается без победителя
+
+  const client = getBotClientFor(streamerId);
+  const channel = getBotChannelFor(streamerId);
+
   if (alivePlayers === 0) {
     Game.gameFinished = true;
     Game.isActive = false;
-    
-    logLine(`[bot] Game finished! No winners - all players died`);
-    
-    // Отправляем событие завершения игры без победителя
+
+    logLine(`[bot] Game finished without winners for streamer ${streamerId}`);
+
     emitOverlay('racePlanEnd', {
       winner: null,
       winnerName: null,
       noWinners: true,
       finalLives: Object.fromEntries(racePlanState.lives)
-    }, getBotChannel());
-    
-    // Объявляем в чате что победителей нет
-    const client = getBotClient();
-    const channel = getBotChannel();
+    }, channel, streamerId);
+
     if (client && channel) {
       client.say(channel, `💀 Гонка завершена! Победителей нет - все игроки выбыли!`).catch(err => logLine(`[bot] say error: ${err.message}`));
     }
-    
-    // Очищаем состояние через 5 секунд
+
     setTimeout(() => {
-      resetGameState();
+      resetGameState(streamerId);
     }, 5000);
     return;
   }
-  
-  // Если есть победитель (достиг финишной линии)
+
   if (winner) {
-    // Игра завершена!
     Game.gameFinished = true;
     Game.isActive = false;
-    
-    // Получаем имя победителя
+
     const winnerName = racePlanState.participantNames.get(winner) || 'Unknown';
-    
-    logLine(`[bot] Game finished! Winner: ${winnerName} (${winner}) at x:${maxX.toFixed(1)}`);
-    
-    // Отправляем событие завершения игры
+
+    logLine(`[bot] Game finished! Winner: ${winnerName} (${winner}) at x:${maxX.toFixed(1)} for streamer ${streamerId}`);
+
     emitOverlay('racePlanEnd', {
-      winner: winner,
-      winnerName: winnerName,
+      winner,
+      winnerName,
       noWinners: false,
       finalLives: Object.fromEntries(racePlanState.lives)
-    }, getBotChannel());
-    
-    // Объявляем победителя в чате
-    const client = getBotClient();
-    const channel = getBotChannel();
+    }, channel, streamerId);
+
     if (client && channel) {
       client.say(channel, `🏆 Гонка завершена! Победитель: @${winnerName}!`).catch(err => logLine(`[bot] say error: ${err.message}`));
     }
-    
-    // Очищаем состояние через 5 секунд
+
     setTimeout(() => {
-      resetGameState();
+      resetGameState(streamerId);
     }, 5000);
   }
 }
 
-function resetGameState() {
-  // Сбрасываем состояние игры
+function resetGameState(streamerId) {
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
   Game.isActive = false;
   Game.gameFinished = false;
   Game.players.clear();
   Game.obstacles = [];
-  
-  // Сбрасываем состояние гонки на самолетах
+  Game.nextObstacleTs = null;
+  Game.lastTickTs = null;
+
   racePlanState.isActive = false;
   racePlanState.gameFinished = true;
   racePlanState.participants.clear();
@@ -1180,16 +1126,20 @@ function resetGameState() {
   racePlanState.lives.clear();
   racePlanState.obstacles = [];
   racePlanState.winner = null;
-  
-  logLine(`[bot] Game state reset after finish`);
+
+  logLine(`[bot] Game state reset after finish for streamer ${streamerId}`);
 }
 
-function maybeSpawnObstacle(now) {
-  if (!maybeSpawnObstacle.next) maybeSpawnObstacle.next = now;
-  if (now < maybeSpawnObstacle.next) return;
-  
-  spawnGameObstacle(getBotChannel());
-  maybeSpawnObstacle.next = now + 1600; // каждые ~1.6 сек (уменьшено в 2 раза)
+function maybeSpawnObstacle(streamerId, now) {
+  const { Game } = getPlaneGameState(streamerId);
+  if (!Game.nextObstacleTs) Game.nextObstacleTs = now;
+  if (now < Game.nextObstacleTs) return;
+
+  const channel = getBotChannelFor(streamerId);
+  if (channel) {
+    spawnGameObstacle(streamerId, channel);
+  }
+  Game.nextObstacleTs = now + 1600;
 }
 
 function sweptOverlap1D(x0, x1, cx2, halfSum) {
@@ -1198,7 +1148,8 @@ function sweptOverlap1D(x0, x1, cx2, halfSum) {
   return !(maxX < cx2 - halfSum || minX > cx2 + halfSum);
 }
 
-function handleGameCollisions() {
+function handleGameCollisions(streamerId) {
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
   const AVATAR_BASE_W = 72;     // как у тебя было
   const AVATAR_SCALE  = 0.4;    // как в overlay.css
 
@@ -1219,7 +1170,7 @@ function handleGameCollisions() {
       if (!hit) continue;
 
       // столкновение
-      logLine(`[bot] Collision detected: player ${id} at x:${p.x.toFixed(1)} with obstacle at x:${o.x.toFixed(1)} (pHalf:${pHalf}, oHalf:${obstacleHalf})`);
+      logLine(`[bot] Collision detected: player ${id} at x:${p.x.toFixed(1)} with obstacle at x:${o.x.toFixed(1)} (pHalf:${pHalf}, oHalf:${obstacleHalf}) [streamer ${streamerId}]`);
       p.lives = Math.max(0, (p.lives ?? 3) - 1);
       if (p.lives <= 0) p.out = true;
 
@@ -1229,7 +1180,7 @@ function handleGameCollisions() {
       // синхронизируем с racePlanState
       racePlanState.lives.set(id, p.lives);
       
-      emitOverlay('racePlanCollision', { playerId: id, lives: p.lives }, getBotChannel());
+      emitOverlay('racePlanCollision', { playerId: id, lives: p.lives }, getBotChannelFor(streamerId), streamerId);
       break;
     }
     
@@ -1241,19 +1192,16 @@ function handleGameCollisions() {
   const obstaclesToRemove = [];
   Game.obstacles = Game.obstacles.filter(o => {
     if (o.hitFor && o.hitFor.size > 0) {
-      // Препятствие столкнулось с игроком - удаляем его
       obstaclesToRemove.push(o);
-      return false; // удаляем из массива
+      return false;
     }
-    return true; // оставляем в массиве
+    return true;
   });
-  
-  // Отправляем события удаления препятствий на клиент
+
   obstaclesToRemove.forEach(o => {
-    emitOverlay('obstacleRemove', { id: o.id }, getBotChannel());
-    logLine(`[bot] Removing obstacle ${o.id} after collision`);
-    
-    // Также удаляем из racePlanState.obstacles
+    emitOverlay('obstacleRemove', { id: o.id }, getBotChannelFor(streamerId), streamerId);
+    logLine(`[bot] Removing obstacle ${o.id} after collision for streamer ${streamerId}`);
+
     const index = racePlanState.obstacles.findIndex(obs => obs.id === o.id);
     if (index !== -1) {
       racePlanState.obstacles.splice(index, 1);
@@ -1261,21 +1209,21 @@ function handleGameCollisions() {
   });
 }
 
-function broadcastState() {
-  logLine(`[bot] === BROADCAST STATE ===`);
+function broadcastState(streamerId) {
+  const { Game } = getPlaneGameState(streamerId);
+  logLine(`[bot] === BROADCAST STATE for streamer ${streamerId} ===`);
   logLine(`[bot] Game.players.size: ${Game.players.size}`);
   logLine(`[bot] Game.obstacles.length: ${Game.obstacles.length}`);
   
   const players = Array.from(Game.players.entries()).map(([id, p]) => ({
     id,
     lane: p.lane ?? 1,
-    x: p.x ?? 50, // позиция по X с сервера
+    x: p.x ?? 50,
     lives: Math.max(0, p.lives ?? Game.maxLives),
     out: !!p.out,
   }));
   
-  logLine(`[bot] Broadcasting state: ${players.length} players, Game.isActive: ${Game.isActive}`);
-  
+  logLine(`[bot] Broadcasting state for streamer ${streamerId}: ${players.length} players, Game.isActive: ${Game.isActive}`);
   if (players.length > 0) {
     logLine(`[bot] First player data:`, players[0]);
   }
@@ -1286,112 +1234,96 @@ function broadcastState() {
     finished: !!Game.gameFinished,
   };
   
-  const botChannel = getBotChannel();
-  logLine(`[bot] Emitting racePlanState:`, JSON.stringify(stateData));
+  const botChannel = getBotChannelFor(streamerId);
+  logLine(`[bot] Emitting racePlanState for streamer ${streamerId}:`, JSON.stringify(stateData));
   logLine(`[bot] Bot channel: ${botChannel}`);
-  emitOverlay('racePlanState', stateData, botChannel);
+  emitOverlay('racePlanState', stateData, botChannel, streamerId);
   
-  // Также отправляем батч препятствий
-  const obstaclesData = Game.obstacles.map(o => ({ 
-    id: o.id, 
-    x: o.x, 
-    lane: o.lane, 
-    type: o.type 
+  const obstaclesData = Game.obstacles.map(o => ({
+    id: o.id,
+    x: o.x,
+    lane: o.lane,
+    type: o.type
   }));
   
   if (obstaclesData.length > 0) {
-    logLine(`[bot] Emitting racePlanObstacleBatch:`, obstaclesData);
-    emitOverlay('racePlanObstacleBatch', obstaclesData, getBotChannel());
+    logLine(`[bot] Emitting racePlanObstacleBatch for streamer ${streamerId}:`, obstaclesData);
+    emitOverlay('racePlanObstacleBatch', obstaclesData, botChannel, streamerId);
   }
 }
 
-function startFoodGame(client, channel, settings = {}) {
+function startFoodGame(streamerId, client, channel, settings = {}) {
   const { minParticipants = 1, maxParticipants = 10, registrationTime = 10 } = settings;
-  
-  logLine(`[bot] Starting food game in channel: ${channel} with settings:`, settings);
-  
-  // Prevent multiple game starts
+  const { foodGameState } = getStreamerState(streamerId);
+
+  logLine(`[bot] Starting food game for streamer ${streamerId} in channel ${channel} with settings: ${JSON.stringify(settings)}`);
+
   if (foodGameState.isActive && !foodGameState.gameFinished) {
-    logLine(`[bot] Food game already active, ignoring start request`);
+    logLine(`[bot] Food game already active for streamer ${streamerId}, ignoring start request`);
     return;
   }
-  
-  // Allow starting new game even if one is active (reset previous game)
-  if (foodGameState.isActive) {
-    logLine(`[bot] Resetting previous food game state`);
-    // Reset game state
-    foodGameState.isActive = false;
-    foodGameState.participants.clear();
-    foodGameState.participantNames.clear();
-    foodGameState.scores.clear();
-    foodGameState.directions.clear();
-    foodGameState.speedModifiers.clear();
-    foodGameState.carrots = [];
-    foodGameState.winner = null;
-    foodGameState.gameStarted = false;
-    foodGameState.gameFinished = false;
-    foodGameState.startTime = null;
-  }
 
-  // Set game state
+  // Полный сброс состояния
   foodGameState.isActive = true;
+  foodGameState.gameFinished = false;
+  foodGameState.gameStarted = false;
+  foodGameState.winner = null;
+  foodGameState.startTime = null;
   foodGameState.participants.clear();
   foodGameState.participantNames.clear();
   foodGameState.scores.clear();
   foodGameState.directions.clear();
   foodGameState.speedModifiers.clear();
   foodGameState.carrots = [];
-  foodGameState.winner = null;
-  foodGameState.gameStarted = false;
-  foodGameState.gameFinished = false;
-  foodGameState.startTime = null;
 
-  // Announce game with settings
   client.say(channel, `🥕 Кто хочет участвовать в игре "Собери еду", отправьте + в чат! У вас есть ${registrationTime} секунд! (${minParticipants}-${maxParticipants} участников)`).catch(err => logLine(`[bot] say error: ${err.message}`));
-  logLine(`[bot] Food game announced in channel: ${channel}`);
-  
-  // Start registration timer
+
   setTimeout(() => {
-    if (foodGameState.participants.size < minParticipants) {
-      client.say(channel, `⏰ Время вышло! Недостаточно участников (${foodGameState.participants.size}/${minParticipants}). Игра отменена.`).catch(err => logLine(`[bot] say error: ${err.message}`));
-      foodGameState.isActive = false;
+    const { foodGameState: currentState } = getStreamerState(streamerId);
+    if (!currentState.isActive || currentState.gameFinished) {
       return;
     }
-    
-    // Limit participants if too many joined
-    if (foodGameState.participants.size > maxParticipants) {
-      const participantsArray = Array.from(foodGameState.participants);
+
+    if (currentState.participants.size < minParticipants) {
+      client.say(channel, `⏰ Время вышло! Недостаточно участников (${currentState.participants.size}/${minParticipants}). Игра отменена.`).catch(err => logLine(`[bot] say error: ${err.message}`));
+      currentState.isActive = false;
+      currentState.gameStarted = false;
+      return;
+    }
+
+    if (currentState.participants.size > maxParticipants) {
+      const participantsArray = Array.from(currentState.participants);
       const selectedParticipants = participantsArray.slice(0, maxParticipants);
-      
-      // Reset participants to only selected ones
-      foodGameState.participants.clear();
-      foodGameState.participantNames.clear();
-      
+
+      currentState.participants.clear();
+      currentState.participantNames.clear();
+
       selectedParticipants.forEach(participantId => {
-        foodGameState.participants.add(participantId);
+        currentState.participants.add(participantId);
       });
-      
+
       client.say(channel, `🎯 Слишком много участников! Выбраны первые ${maxParticipants} участников.`).catch(err => logLine(`[bot] say error: ${err.message}`));
     }
-    
-    startFoodGameCountdown(client, channel);
+
+    startFoodGameCountdown(streamerId, client, channel);
   }, registrationTime * 1000);
 }
 
-function startFoodGameCountdown(client, channel) {
-  if (!foodGameState.isActive) return;
+function startFoodGameCountdown(streamerId, client, channel) {
+  const { foodGameState } = getStreamerState(streamerId);
+  if (!foodGameState.isActive) {
+    return;
+  }
 
   foodGameState.gameStarted = true;
   foodGameState.startTime = Date.now();
 
-  // Initialize scores, directions and speed modifiers for all participants
   foodGameState.participants.forEach(participantId => {
     foodGameState.scores.set(participantId, 0);
-    foodGameState.directions.set(participantId, 1); // Start moving right
-    foodGameState.speedModifiers.set(participantId, 0); // No speed modifier initially
+    foodGameState.directions.set(participantId, 1);
+    foodGameState.speedModifiers.set(participantId, 0);
   });
 
-  // Emit food game start event to overlay
   const foodGameStartData = {
     participants: Array.from(foodGameState.participants).map(participantId => ({
       userId: participantId,
@@ -1399,27 +1331,32 @@ function startFoodGameCountdown(client, channel) {
     })),
     countdown: 3
   };
-  logLine(`[bot] Emitting foodGameStart event: ${JSON.stringify(foodGameStartData)}`);
-  emitOverlay('foodGameStart', foodGameStartData, channel);
 
-  // Countdown
+  logLine(`[bot] Emitting foodGameStart for streamer ${streamerId}: ${JSON.stringify(foodGameStartData)}`);
+  emitOverlay('foodGameStart', foodGameStartData, channel, streamerId);
+
   let count = 3;
   const countdownInterval = setInterval(() => {
+    const { foodGameState: currentState } = getStreamerState(streamerId);
+    if (!currentState.isActive || currentState.gameFinished) {
+      clearInterval(countdownInterval);
+      return;
+    }
+
     if (count > 0) {
       client.say(channel, `🥕 ${count}...`).catch(err => logLine(`[bot] say error: ${err.message}`));
       count--;
     } else {
       clearInterval(countdownInterval);
       client.say(channel, '🥕 ИГРА НАЧАЛАСЬ! Собирайте падающие морковки! Пишите "1" чтобы повернуть!').catch(err => logLine(`[bot] say error: ${err.message}`));
-      
-      // Start food game monitoring
-      startFoodGameMonitoring(client, channel);
+      startFoodGameMonitoring(streamerId, client, channel);
     }
   }, 1000);
 }
 
-function startFoodGameMonitoring(client, channel) {
-  // Emit food game monitoring start
+function startFoodGameMonitoring(streamerId, client, channel) {
+  const { foodGameState } = getStreamerState(streamerId);
+
   emitOverlay('foodGameMonitoring', {
     participants: Array.from(foodGameState.participants).map(participantId => ({
       userId: participantId,
@@ -1428,129 +1365,148 @@ function startFoodGameMonitoring(client, channel) {
     scores: Object.fromEntries(foodGameState.scores),
     directions: Object.fromEntries(foodGameState.directions),
     speedModifiers: Object.fromEntries(foodGameState.speedModifiers)
-  }, channel);
+  }, channel, streamerId);
 
-  // Start carrot spawning
   const carrotInterval = setInterval(() => {
-    if (!foodGameState.isActive || foodGameState.gameFinished) {
+    const { foodGameState: currentState } = getStreamerState(streamerId);
+    if (!currentState.isActive || currentState.gameFinished) {
       clearInterval(carrotInterval);
       return;
     }
-    spawnCarrot(channel);
-  }, 2000); // Spawn carrot every 2 seconds
+    spawnCarrot(streamerId, channel);
+  }, 2000);
 
-  // Start collision checking
   const collisionInterval = setInterval(() => {
-    if (!foodGameState.isActive || foodGameState.gameFinished) {
+    const { foodGameState: currentState } = getStreamerState(streamerId);
+    if (!currentState.isActive || currentState.gameFinished) {
       clearInterval(collisionInterval);
       return;
     }
-    checkCarrotCollisions();
-  }, 100); // Check collisions every 100ms
+    checkCarrotCollisions(streamerId, client, channel);
+  }, 100);
 }
 
-function checkFoodGameCommand(text, userId, displayName, client, channel) {
+function joinFoodGame(streamerId, userId, displayName, client, channel) {
+  const { foodGameState } = getStreamerState(streamerId);
+
+  if (!foodGameState.isActive || foodGameState.gameFinished) {
+    return;
+  }
+
+  if (foodGameState.participants.has(userId)) {
+    client.say(channel, `@${displayName} вы уже участвуете в игре!`).catch(err => logLine(`[bot] say error: ${err.message}`));
+    return;
+  }
+
+  foodGameState.participants.add(userId);
+  foodGameState.participantNames.set(userId, displayName);
+  foodGameState.scores.set(userId, 0);
+  foodGameState.directions.set(userId, 1);
+  foodGameState.speedModifiers.set(userId, 0);
+
+  const participantCount = foodGameState.participants.size;
+  client.say(channel, `🥕 @${displayName} присоединился к игре! Участников: ${participantCount}`).catch(err => logLine(`[bot] say error: ${err.message}`));
+  logLine(`[bot] User ${displayName} (${userId}) joined food game for streamer ${streamerId}. Total participants: ${participantCount}`);
+}
+
+function checkFoodGameCommand(streamerId, text, userId, displayName, client, channel) {
+  const { foodGameState } = getStreamerState(streamerId);
   if (!foodGameState.isActive || !foodGameState.gameStarted || foodGameState.gameFinished) return;
-  
-  // Check if user is a participant
+
   if (!foodGameState.participants.has(userId)) return;
-  
-  // Check for direction change command
+
   if (text.trim() === '1') {
     const currentDirection = foodGameState.directions.get(userId) || 1;
-    const newDirection = -currentDirection; // Reverse direction
-    
+    const newDirection = -currentDirection;
+
     foodGameState.directions.set(userId, newDirection);
-    
-    // Emit direction update
+
     emitOverlay('foodGameDirectionUpdate', {
-      userId: userId,
+      userId,
       direction: newDirection
-    }, channel);
-    
-    logLine(`[bot] User ${displayName} changed direction to ${newDirection > 0 ? 'right' : 'left'}`);
+    }, channel, streamerId);
+
+    logLine(`[bot] User ${displayName} changed direction to ${newDirection > 0 ? 'right' : 'left'} (streamer ${streamerId})`);
   }
 }
 
-function checkFoodGameCheering(text, client, channel) {
+function checkFoodGameCheering(streamerId, text, client, channel) {
+  const { foodGameState } = getStreamerState(streamerId);
   if (!foodGameState.isActive || !foodGameState.gameStarted || foodGameState.gameFinished) return;
-  
-  // Check if message mentions any food game participant
+
   const participants = Array.from(foodGameState.participants);
-  
+
   for (const participantId of participants) {
     const participantName = foodGameState.participantNames.get(participantId);
     if (!participantName) continue;
-    
-    // Check if participant is mentioned in the message
+
     const mentionPattern = new RegExp(`@?${participantName}`, 'i');
     if (mentionPattern.test(text) || text.toLowerCase().includes('cheer') || text.includes('go')) {
-      // Add speed modifier
       const currentModifier = foodGameState.speedModifiers.get(participantId) || 0;
-      const newModifier = Math.min(currentModifier + 0.05, 3.0); // Max 300% speed boost (уменьшено в 2 раза)
+      const newModifier = Math.min(currentModifier + 0.05, 3.0);
       foodGameState.speedModifiers.set(participantId, newModifier);
-      
-      // Emit speed update
+
       emitOverlay('foodGameSpeedUpdate', {
         userId: participantId,
         speedModifier: newModifier
-      }, channel);
-      
+      }, channel, streamerId);
+
       client.say(channel, `💨 @${participantName} получил ускорение! Скорость: +${Math.round(newModifier * 100)}%`).catch(err => logLine(`[bot] say error: ${err.message}`));
-      logLine(`[bot] User ${participantName} got speed boost: +${Math.round(newModifier * 100)}%`);
+      logLine(`[bot] User ${participantName} got speed boost: +${Math.round(newModifier * 100)}% (streamer ${streamerId})`);
       break;
     }
   }
 }
 
-function spawnCarrot(channel) {
+function spawnCarrot(streamerId, channel) {
+  const { foodGameState } = getStreamerState(streamerId);
   if (!foodGameState.isActive || foodGameState.gameFinished) return;
-  
+
   const carrot = {
     id: Date.now() + Math.random(),
-    x: Math.random() * 1200, // Random X position (assuming 1200px width)
-    y: -30, // Start above screen
-    speed: 2 + Math.random() * 2, // Random fall speed
+    x: Math.random() * 1200,
+    y: -30,
+    speed: 2 + Math.random() * 2,
     collected: false
   };
-  
+
   foodGameState.carrots.push(carrot);
-  
-  // Emit carrot spawn
-  emitOverlay('carrotSpawn', carrot, channel);
-  
-  // Remove carrot after 15 seconds if not collected (10s falling + 3s on ground + 2s buffer)
+
+  emitOverlay('carrotSpawn', { ...carrot }, channel, streamerId);
+
   setTimeout(() => {
-    const index = foodGameState.carrots.findIndex(c => c.id === carrot.id);
+    const { foodGameState: currentState } = getStreamerState(streamerId);
+    const index = currentState.carrots.findIndex(c => c.id === carrot.id);
     if (index !== -1) {
-      foodGameState.carrots.splice(index, 1);
-      emitOverlay('carrotRemove', { id: carrot.id }, channel);
+      currentState.carrots.splice(index, 1);
+      emitOverlay('carrotRemove', { id: carrot.id }, channel, streamerId);
     }
   }, 15000);
 }
 
-function checkCarrotCollisions() {
+function checkCarrotCollisions(streamerId, client, channel) {
+  const { foodGameState } = getStreamerState(streamerId);
   if (!foodGameState.isActive || foodGameState.gameFinished) return;
-  
+
   foodGameState.participants.forEach(userId => {
     const score = foodGameState.scores.get(userId) || 0;
     if (score >= 10) {
-      // Winner found!
       foodGameState.winner = userId;
       foodGameState.gameFinished = true;
       foodGameState.isActive = false;
-      
+
       const winnerName = foodGameState.participantNames.get(userId) || 'Unknown';
-      logLine(`[bot] Food game winner: ${winnerName} (${userId})`);
-      
-      // Emit game end
+      logLine(`[bot] Food game winner for streamer ${streamerId}: ${winnerName} (${userId})`);
+
       emitOverlay('foodGameEnd', {
         winner: userId,
-        winnerName: winnerName,
+        winnerName,
         finalScores: Object.fromEntries(foodGameState.scores)
-      }, channel);
-      
-      return;
+      }, channel, streamerId);
+
+      if (client && channel) {
+        client.say(channel, `🏁 Игра "Собери морковку" завершена! Победитель: @${winnerName}!`).catch(err => logLine(`[bot] say error: ${err.message}`));
+      }
     }
   });
 }
@@ -1570,30 +1526,15 @@ function finishFoodGame(winnerName, client, channel) {
   }
 }
 
-// Race Plan Game Functions
-// Состояние игры "Гонка на самолетах"
-const racePlanState = {
-  isActive: false,
-  participants: new Set(),
-  participantNames: new Map(),
-  positions: new Map(), // userId -> { x: number, y: number }
-  levels: new Map(), // userId -> level (0, 1, 2) - 3 уровня высоты
-  lives: new Map(), // userId -> lives (3, 2, 1, 0)
-  obstacles: [], // Массив препятствий
-  gameStarted: false,
-  gameFinished: false,
-  startTime: null,
-  winner: null,
-  maxParticipants: 8,
-  trackWidth: 1200 // Динамически обновляется с клиента
-};
-
-function startRacePlan(client, channel, settings = {}) {
+function startRacePlan(streamerId, client, channel, settings = {}) {
   const { minParticipants = 1, maxParticipants = 8, registrationTime = 10 } = settings;
   
   logLine(`[bot] Starting race plan in channel: ${channel} with settings:`, settings);
   logLine(`[bot] Client object:`, typeof client, client ? 'exists' : 'null');
   logLine(`[bot] Channel:`, channel);
+  logLine(`[bot] Streamer: ${streamerId}`);
+
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
   
   // Проверяем client объект
   if (!client) {
@@ -1691,12 +1632,13 @@ function startRacePlan(client, channel, settings = {}) {
     }
     
     logLine(`[bot] About to call startRacePlanCountdown with client: ${typeof client}, channel: ${channel}`);
-    startRacePlanCountdown(client, channel);
+    startRacePlanCountdown(streamerId, client, channel);
   }, registrationTime * 1000);
 }
 
-function joinRacePlan(userId, displayName, client, channel) {
-  logLine(`[bot] joinRacePlan called with client: ${typeof client}, channel: ${channel}`);
+function joinRacePlan(streamerId, userId, displayName, client, channel) {
+  logLine(`[bot] joinRacePlan called for streamer ${streamerId} with client: ${typeof client}, channel: ${channel}`);
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
   
   if (!client || !client.say) {
     logLine(`[bot] ERROR: client or client.say not available in joinRacePlan!`);
@@ -1713,9 +1655,9 @@ function joinRacePlan(userId, displayName, client, channel) {
 
   racePlanState.participants.add(userId);
   racePlanState.participantNames.set(userId, displayName);
-  racePlanState.positions.set(userId, { x: 50, y: 0 }); // Start at left side, middle level
-  racePlanState.levels.set(userId, 1); // Start at middle level (0=top, 1=middle, 2=bottom)
-  racePlanState.lives.set(userId, 3); // Start with 3 lives
+  racePlanState.positions.set(userId, { x: 50, y: 0 });
+  racePlanState.levels.set(userId, 1);
+  racePlanState.lives.set(userId, 3);
 
   // Добавляем в Game состояние
   Game.players.set(userId, {
@@ -1732,14 +1674,15 @@ function joinRacePlan(userId, displayName, client, channel) {
     logLine(`[bot] say error: ${err.message}`);
     logLine(`[bot] Full error: ${JSON.stringify(err)}`);
   });
-  logLine(`[bot] User ${displayName} (${userId}) joined race plan. Total participants: ${participantCount}`);
+  logLine(`[bot] User ${displayName} (${userId}) joined race plan for streamer ${streamerId}. Total participants: ${participantCount}`);
 }
 
-function startRacePlanCountdown(client, channel) {
-  logLine(`[bot] startRacePlanCountdown called with client: ${typeof client}, channel: ${channel}`);
+function startRacePlanCountdown(streamerId, client, channel) {
+  logLine(`[bot] startRacePlanCountdown called for streamer ${streamerId} with client: ${typeof client}, channel: ${channel}`);
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
   
   if (!racePlanState.isActive) {
-    logLine(`[bot] Race plan not active, returning from countdown`);
+    logLine(`[bot] Race plan not active for streamer ${streamerId}, returning from countdown`);
     return;
   }
 
@@ -1751,28 +1694,29 @@ function startRacePlanCountdown(client, channel) {
   racePlanState.gameStarted = true;
   racePlanState.startTime = Date.now();
 
-  // Активируем Game состояние со старта отсчета
   Game.isActive = true;
 
-  // Emit plane race start event to overlay
   const racePlanStartData = {
     participants: Array.from(racePlanState.participants),
     countdown: 3,
     levels: Object.fromEntries(racePlanState.levels),
     lives: Object.fromEntries(racePlanState.lives)
   };
-  logLine(`[bot] Emitting racePlanStart event: ${JSON.stringify(racePlanStartData)}`);
+  logLine(`[bot] Emitting racePlanStart event for streamer ${streamerId}: ${JSON.stringify(racePlanStartData)}`);
   logLine(`[bot] Race plan participants count: ${racePlanState.participants.size}`);
   logLine(`[bot] Race plan participants: ${Array.from(racePlanState.participants).join(', ')}`);
-  emitOverlay('racePlanStart', racePlanStartData, channel);
+  emitOverlay('racePlanStart', racePlanStartData, channel, streamerId);
 
-  // Countdown
   let count = 3;
   logLine(`[bot] Starting countdown with client: ${typeof client}, channel: ${channel}`);
   
   const countdownInterval = setInterval(() => {
     logLine(`[bot] Countdown tick: ${count}, client available: ${!!client}, client.say available: ${!!(client && client.say)}`);
-    
+    if (!racePlanState.isActive) {
+      clearInterval(countdownInterval);
+      return;
+    }
+
     if (count > 0) {
       if (client && client.say) {
         client.say(channel, `✈️ ${count}...`).catch(err => {
@@ -1795,159 +1739,152 @@ function startRacePlanCountdown(client, channel) {
       } else {
         logLine(`[bot] ERROR: Cannot send start message - client not available`);
       }
-      
-      // Start plane race monitoring
-      startPlaneRaceMonitoring(client, channel);
+
+      startPlaneRaceMonitoring(streamerId, client, channel);
     }
   }, 1000);
 }
 
-function startPlaneRaceMonitoring(client, channel) {
-  logLine(`[bot] === STARTING PLANE RACE MONITORING ===`);
+function startPlaneRaceMonitoring(streamerId, client, channel) {
+  logLine(`[bot] === STARTING PLANE RACE MONITORING for streamer ${streamerId} ===`);
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
   logLine(`[bot] Game.isActive: ${Game.isActive}, Game.gameFinished: ${Game.gameFinished}`);
   logLine(`[bot] Game.players.size: ${Game.players.size}`);
   
-  // Emit plane race monitoring start
   emitOverlay('racePlanMonitoring', {
     participants: Array.from(racePlanState.participants),
     positions: Object.fromEntries(racePlanState.positions),
     levels: Object.fromEntries(racePlanState.levels),
     lives: Object.fromEntries(racePlanState.lives)
-  }, channel);
+  }, channel, streamerId);
 
-  // Start obstacle spawning
   const obstacleInterval = setInterval(() => {
-    logLine(`[bot] Obstacle spawn check: Game.isActive=${Game.isActive}, Game.gameFinished=${Game.gameFinished}`);
-    if (!Game.isActive || Game.gameFinished) {
-      logLine(`[bot] Stopping obstacle spawn interval`);
+    const { Game: currentGame } = getPlaneGameState(streamerId);
+    logLine(`[bot] Obstacle spawn check for streamer ${streamerId}: Game.isActive=${currentGame.isActive}, Game.gameFinished=${currentGame.gameFinished}`);
+    if (!currentGame.isActive || currentGame.gameFinished) {
+      logLine(`[bot] Stopping obstacle spawn interval for streamer ${streamerId}`);
       clearInterval(obstacleInterval);
       return;
     }
-    logLine(`[bot] Spawning obstacle`);
-    spawnGameObstacle(channel);
-  }, 4000); // Spawn obstacle every 4 seconds (уменьшено в 2 раза)
+    logLine(`[bot] Spawning obstacle for streamer ${streamerId}`);
+    spawnGameObstacle(streamerId, channel);
+  }, 4000);
 
-  // Start server tick (движение аватаров, препятствий и коллизии)
   const gameTickInterval = setInterval(() => {
-    logLine(`[bot] Tick check: Game.isActive=${Game.isActive}, Game.gameFinished=${Game.gameFinished}`);
-    if (!Game.isActive || Game.gameFinished) {
-      logLine(`[bot] Stopping game tick interval`);
+    const { Game: currentGame } = getPlaneGameState(streamerId);
+    logLine(`[bot] Tick check for streamer ${streamerId}: Game.isActive=${currentGame.isActive}, Game.gameFinished=${currentGame.gameFinished}`);
+    if (!currentGame.isActive || currentGame.gameFinished) {
+      logLine(`[bot] Stopping game tick interval for streamer ${streamerId}`);
       clearInterval(gameTickInterval);
       return;
     }
-    
-    logLine(`[bot] Running serverTick()`);
-    serverTick();
-  }, 100); // Game tick every 100ms
+
+    logLine(`[bot] Running serverTick() for streamer ${streamerId}`);
+    serverTick(streamerId);
+  }, 100);
   
-  logLine(`[bot] Game tick started, interval ID: ${gameTickInterval}`);
+  logLine(`[bot] Game tick started for streamer ${streamerId}, interval ID: ${gameTickInterval}`);
 }
 
-function checkRacePlanCommand(text, userId, displayName, client, channel) {
+function checkRacePlanCommand(streamerId, text, userId, displayName, client, channel) {
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
   if (!racePlanState.isActive || !racePlanState.gameStarted || racePlanState.gameFinished) return;
-  
-  // Check if user is a participant
+
   if (!racePlanState.participants.has(userId)) return;
-  
-  // Check for level change commands
+
   if (text.trim() === 'верх') {
     const currentLevel = racePlanState.levels.get(userId) || 1;
     if (currentLevel > 0) {
-      const newLevel = currentLevel - 1; // Move up (0=top, 1=middle, 2=bottom)
+      const newLevel = currentLevel - 1;
       racePlanState.levels.set(userId, newLevel);
-      
-      // Update Game state as well
+
       const gamePlayer = Game.players.get(userId);
       if (gamePlayer) {
         gamePlayer.lane = newLevel;
       }
-      
-      // Emit level update
+
       emitOverlay('racePlanLevelUpdate', {
-        userId: userId,
+        userId,
         level: newLevel
-      }, channel);
-      
-      logLine(`[bot] User ${displayName} moved to level ${newLevel}`);
+      }, channel, streamerId);
+
+      logLine(`[bot] User ${displayName} moved to level ${newLevel} (streamer ${streamerId})`);
     }
   } else if (text.trim() === 'низ') {
     const currentLevel = racePlanState.levels.get(userId) || 1;
     if (currentLevel < 2) {
-      const newLevel = currentLevel + 1; // Move down (0=top, 1=middle, 2=bottom)
+      const newLevel = currentLevel + 1;
       racePlanState.levels.set(userId, newLevel);
-      
-      // Update Game state as well
+
       const gamePlayer = Game.players.get(userId);
       if (gamePlayer) {
         gamePlayer.lane = newLevel;
       }
-      
-      // Emit level update
+
       emitOverlay('racePlanLevelUpdate', {
-        userId: userId,
+        userId,
         level: newLevel
-      }, channel);
-      
-      logLine(`[bot] User ${displayName} moved to level ${newLevel}`);
+      }, channel, streamerId);
+
+      logLine(`[bot] User ${displayName} moved to level ${newLevel} (streamer ${streamerId})`);
     }
   }
 }
 
-function checkRacePlanCheering(text, client, channel) {
+function checkRacePlanCheering(streamerId, text, client, channel) {
+  const { racePlanState } = getPlaneGameState(streamerId);
   if (!racePlanState.isActive || !racePlanState.gameStarted || racePlanState.gameFinished) return;
-  
-  // Check if message mentions any plane race participant
+
   const participants = Array.from(racePlanState.participants);
-  
+
   for (const participantId of participants) {
     const participantName = racePlanState.participantNames.get(participantId);
     if (!participantName) continue;
-    
-    // Check if participant is mentioned in the message
+
     const mentionPattern = new RegExp(`@?${participantName}`, 'i');
     if (mentionPattern.test(text) || text.toLowerCase().includes('cheer') || text.includes('go')) {
-      // Add speed boost (temporary)
       const currentPos = racePlanState.positions.get(participantId) || { x: 50, y: 0 };
-      racePlanState.positions.set(participantId, { x: currentPos.x + 5, y: currentPos.y }); // Уменьшено в 2 раза
-      
-      // Emit position update
+      racePlanState.positions.set(participantId, { x: currentPos.x + 5, y: currentPos.y });
+
       emitOverlay('racePlanPositionUpdate', {
         userId: participantId,
         position: racePlanState.positions.get(participantId)
-      }, channel);
-      
-      client.say(channel, `💨 @${participantName} получил ускорение!`).catch(err => logLine(`[bot] say error: ${err.message}`));
-      logLine(`[bot] User ${participantName} got speed boost`);
+      }, channel, streamerId);
+
+      if (client && channel) {
+        client.say(channel, `💨 @${participantName} получил ускорение!`).catch(err => logLine(`[bot] say error: ${err.message}`));
+      }
+      logLine(`[bot] User ${participantName} got speed boost (streamer ${streamerId})`);
       break;
     }
   }
 }
 
-function spawnObstacle(channel) {
+function spawnObstacle(streamerId, channel) {
+  const { racePlanState } = getPlaneGameState(streamerId);
   if (!racePlanState.isActive || racePlanState.gameFinished) return;
-  
-  const randomLevel = Math.floor(Math.random() * 3); // Random level (0, 1, or 2)
+
+  const randomLevel = Math.floor(Math.random() * 3);
   const obstacle = {
     id: Date.now() + Math.random(),
-    x: 1200, // Start from right side
-    y: randomLevel, // Random level (0, 1, or 2)
-    speed: 3 + Math.random() * 2, // Random speed
-    type: Math.random() > 0.5 ? 'bird' : 'plane' // Random obstacle type
+    x: 1200,
+    y: randomLevel,
+    speed: 3 + Math.random() * 2,
+    type: Math.random() > 0.5 ? 'bird' : 'plane'
   };
-  
+
   racePlanState.obstacles.push(obstacle);
-  
-  logLine(`[bot] Spawning obstacle in lane ${randomLevel} (type: ${obstacle.type})`);
-  
-  // Emit obstacle spawn
-  emitOverlay('obstacleSpawn', obstacle, channel);
-  
-  // Remove obstacle after 15 seconds if not hit
+
+  logLine(`[bot] Spawning obstacle in lane ${randomLevel} (type: ${obstacle.type}) for streamer ${streamerId}`);
+
+  emitOverlay('obstacleSpawn', obstacle, channel, streamerId);
+
   setTimeout(() => {
-    const index = racePlanState.obstacles.findIndex(o => o.id === obstacle.id);
+    const { racePlanState: currentState } = getPlaneGameState(streamerId);
+    const index = currentState.obstacles.findIndex(o => o.id === obstacle.id);
     if (index !== -1) {
-      racePlanState.obstacles.splice(index, 1);
-      emitOverlay('obstacleRemove', { id: obstacle.id }, channel);
+      currentState.obstacles.splice(index, 1);
+      emitOverlay('obstacleRemove', { id: obstacle.id }, channel, streamerId);
     }
   }, 15000);
 }
@@ -1955,7 +1892,8 @@ function spawnObstacle(channel) {
 // Удаляем дублированную функцию serverTick - используем первую версию
 
 // Функция обработки коллизий
-function handleCollision(playerId) {
+function handleCollision(streamerId, playerId) {
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
   const p = Game.players.get(playerId);
   if (!p) return;
   
@@ -1968,81 +1906,75 @@ function handleCollision(playerId) {
   racePlanState.lives.set(playerId, p.lives);
   
   // Отправляем событие коллизии
-  emitOverlay('racePlanCollision', { playerId, lives: p.lives }, getBotChannel());
+  emitOverlay('racePlanCollision', { playerId, lives: p.lives }, getBotChannelFor(streamerId), streamerId);
   
-  logLine(`[bot] Player ${playerId} collision: lives=${p.lives}, out=${p.out}`);
+  logLine(`[bot] Player ${playerId} collision: lives=${p.lives}, out=${p.out} (streamer ${streamerId})`);
 }
 
-function checkRacePlanCollisions() {
+function checkRacePlanCollisions(streamerId, channel) {
+  const { racePlanState } = getPlaneGameState(streamerId);
   if (!racePlanState.isActive || racePlanState.gameFinished) return;
-  
+
+  const client = getBotClientFor(streamerId);
+
   racePlanState.participants.forEach(userId => {
     const position = racePlanState.positions.get(userId) || { x: 50, y: 0 };
     const level = racePlanState.levels.get(userId) || 1;
     const lives = racePlanState.lives.get(userId) || 3;
-    
-    if (lives <= 0) return; // Player is out
-    
-    // Check collision with obstacles
+
+    if (lives <= 0) return;
+
     for (let i = racePlanState.obstacles.length - 1; i >= 0; i--) {
       const obstacle = racePlanState.obstacles[i];
-      
-      // Точная проверка коллизий с учетом реальных размеров хитбоксов
+
       if (obstacle.y === level) {
-        // halfW аватара
         const m = AvatarMetrics.get(userId) || { halfW: 36, halfH: 36 };
-        // половина ширины препятствия (в spawnGameObstacle width уже задаётся)
         const halfObs = (obstacle.width || 80) / 2;
 
-        // position.x и obstacle.x трактуются как центр по X в твоём серверном состоянии
         const dx = Math.abs(position.x - obstacle.x);
         const overlapX = dx <= (m.halfW + halfObs);
 
         if (overlapX) {
-          // Используем новую функцию handleCollision
-          handleCollision(userId);
+          handleCollision(streamerId, userId);
 
-          // убрать препятствие
           racePlanState.obstacles.splice(i, 1);
-          emitOverlay('obstacleRemove', { id: obstacle.id }, getBotChannel());
-          
-          // защитимся от повторного удара по тому же препятствию
+          emitOverlay('obstacleRemove', { id: obstacle.id }, channel, streamerId);
+
           obstacle.hit = true;
-          
-          logLine(`[bot] User ${userId} hit obstacle! dx: ${dx}, halfW: ${m.halfW}, halfObs: ${halfObs}`);
+
+          logLine(`[bot] User ${userId} hit obstacle! dx: ${dx}, halfW: ${m.halfW}, halfObs: ${halfObs} (streamer ${streamerId})`);
           break;
         }
       }
     }
-    
-    // Check if player reached finish line
+
     if (position.x >= 1100) {
       if (!racePlanState.winner) {
         racePlanState.winner = userId;
         racePlanState.gameFinished = true;
         racePlanState.isActive = false;
-        
+
         const winnerName = racePlanState.participantNames.get(userId) || 'Unknown';
-        logLine(`[bot] Plane race winner: ${winnerName} (${userId})`);
-        
-        // Emit race end
+        logLine(`[bot] Plane race winner: ${winnerName} (${userId}) for streamer ${streamerId}`);
+
         emitOverlay('racePlanEnd', {
           winner: userId,
-          winnerName: winnerName,
+          winnerName,
           finalLives: Object.fromEntries(racePlanState.lives)
-        }, channel);
-        
-        // Announce winner in chat
-        client.say(channel, `🏆 Гонка завершена! Победитель: @${winnerName}!`).catch(err => logLine(`[bot] say error: ${err.message}`));
+        }, channel, streamerId);
+
+        if (client && channel) {
+          client.say(channel, `🏆 Гонка завершена! Победитель: @${winnerName}!`).catch(err => logLine(`[bot] say error: ${err.message}`));
+        }
       }
     }
   });
 }
 
-function handleRacePlanCollision(playerId, obstacleId) {
-  logLine(`[bot] handleRacePlanCollision called for player: ${playerId}, obstacle: ${obstacleId}`);
+function handleRacePlanCollision(streamerId, playerId, obstacleId) {
+  const { racePlanState, Game } = getPlaneGameState(streamerId);
+  logLine(`[bot] handleRacePlanCollision called for player: ${playerId}, obstacle: ${obstacleId}, streamer ${streamerId}`);
   
-  // Получаем игрока из Game состояния
   const player = Game.players.get(playerId);
   if (!player) {
     logLine(`[bot] Player ${playerId} not found in Game state`);
@@ -2062,26 +1994,26 @@ function handleRacePlanCollision(playerId, obstacleId) {
     logLine(`[bot] Player ${playerId} is out of the race`);
     
     // Отправляем событие коллизии на overlay
-    emitOverlay('racePlanCollision', { playerId, lives: 0 }, getBotChannel());
+    emitOverlay('racePlanCollision', { playerId, lives: 0 }, getBotChannelFor(streamerId), streamerId);
   } else {
     // Отправляем событие коллизии с оставшимися жизнями
-    emitOverlay('racePlanCollision', { playerId, lives: player.lives }, getBotChannel());
+    emitOverlay('racePlanCollision', { playerId, lives: player.lives }, getBotChannelFor(streamerId), streamerId);
   }
   
-  logLine(`[bot] Player ${playerId} collision: lives=${player.lives}, out=${player.out}`);
+  logLine(`[bot] Player ${playerId} collision: lives=${player.lives}, out=${player.out} (streamer ${streamerId})`);
 }
 
-function finishRacePlan(winnerName, client, channel) {
-  // Завершаем Game состояние
+function finishRacePlan(streamerId, winnerName, client, channel) {
+  const { Game } = getPlaneGameState(streamerId);
   Game.isActive = false;
   Game.gameFinished = true;
-  Game.obstacles = []; // очищаем препятствия
+  Game.obstacles = [];
 
   if (client && channel) {
     client.say(channel, `🏆 Гонка на самолетах завершена! Поздравляем победителя: ${winnerName}! 🏆`);
     console.log(`[Bot] Announced plane race winner: ${winnerName} in channel: ${channel}`);
   } else {
-    console.error('[Bot] Cannot announce plane race winner: Bot client or channel not available.');
+    console.error(`[Bot] Cannot announce plane race winner: Bot client or channel not available for streamer ${streamerId}.`);
   }
 }
 
@@ -2176,6 +2108,6 @@ async function saveBotStateToRedis(streamerId) {
   }
 }
 
-module.exports = { ensureBotFor, stopBot, status, addActiveAvatar, removeActiveAvatar, finishRace, finishFoodGame, getBotClient, getBotClientFor, getBotChannel, getBotChannelFor, startRace, startFoodGame, checkFoodGameCommand, checkFoodGameCheering, checkCarrotCollisions, spawnCarrot, joinFoodGame, startFoodGameCountdown, startFoodGameMonitoring, setAvatarTimeoutSeconds, getAvatarTimeoutSeconds, startRacePlan, joinRacePlan, checkRacePlanCommand, checkRacePlanCheering, spawnObstacle, checkRacePlanCollisions, handleRacePlanCollision, finishRacePlan, setAvatarMetrics, Game, racePlanState, getStreamerState, restoreBotsFromRedis, saveBotStateToRedis };
+module.exports = { ensureBotFor, stopBot, status, addActiveAvatar, removeActiveAvatar, finishRace, finishFoodGame, getBotClient, getBotClientFor, getBotChannel, getBotChannelFor, startRace, startFoodGame, checkFoodGameCommand, checkFoodGameCheering, checkCarrotCollisions, spawnCarrot, joinFoodGame, startFoodGameCountdown, startFoodGameMonitoring, setAvatarTimeoutSeconds, getAvatarTimeoutSeconds, startRacePlan, joinRacePlan, checkRacePlanCommand, checkRacePlanCheering, spawnObstacle, checkRacePlanCollisions, handleRacePlanCollision, finishRacePlan, setAvatarMetrics, getStreamerState, restoreBotsFromRedis, saveBotStateToRedis };
 
 
