@@ -281,10 +281,22 @@ async function ensureBotFor(uid) {
   // Проверяем в Redis, не запущен ли бот в другом процессе
   const { stateManager } = require('../lib/state-redis');
   const botState = await stateManager.getBotState(uid);
+  const currentProcessId = String(process.pid);
+  
   if (botState && botState.active && botState.ownerProcessId) {
-    // Бот уже запущен в другом процессе
-    logLine(`[bot] Bot for streamer ${uid} is already active in process ${botState.ownerProcessId}, skipping creation`);
-    throw new Error(`Bot is already active in another process`);
+    // Проверяем, является ли текущий процесс владельцем
+    const ownerProcessId = String(botState.ownerProcessId);
+    if (ownerProcessId && !ownerProcessId.startsWith(currentProcessId)) {
+      // Бот действительно запущен в другом процессе
+      logLine(`[bot] Bot for streamer ${uid} is already active in another process ${ownerProcessId}, skipping creation`);
+      throw new Error(`Bot is already active in another process`);
+    } else {
+      // Бот был в этом же процессе, но упал - очищаем старое состояние
+      logLine(`[bot] Bot state found for current process, but bot is not running locally. Clearing old state...`);
+      await stateManager.deleteBotState(uid).catch(err => {
+        logLine(`[bot] Failed to clear old bot state: ${err.message}`);
+      });
+    }
   }
 
   // Используем распределенную блокировку для создания бота
@@ -2189,11 +2201,21 @@ async function restoreBotsFromRedis() {
         // Проверяем состояние бота в Redis
         const botState = await stateManager.getBotState(streamerId);
         
-        // Если бот активен в другом процессе, не восстанавливаем его
+        // Проверяем, является ли текущий процесс владельцем бота
         if (botState && botState.active && botState.ownerProcessId) {
-          const currentProcessId = `${process.pid}`;
-          if (botState.ownerProcessId && !botState.ownerProcessId.startsWith(currentProcessId)) {
-            logLine(`[bot] Bot for streamer ${streamerId} is already active in another process (${botState.ownerProcessId}), skipping restoration`);
+          const currentProcessId = String(process.pid);
+          const ownerProcessId = String(botState.ownerProcessId);
+          
+          // Если бот активен в другом процессе - не восстанавливаем
+          if (ownerProcessId && !ownerProcessId.startsWith(currentProcessId)) {
+            logLine(`[bot] Bot for streamer ${streamerId} is already active in another process (${ownerProcessId}), skipping restoration`);
+            continue;
+          }
+          
+          // Если ownerProcessId не начинается с текущего PID, но есть запись - очищаем (старый процесс умер)
+          if (ownerProcessId && !ownerProcessId.startsWith(currentProcessId)) {
+            logLine(`[bot] Clearing stale bot state for streamer ${streamerId} (old process: ${ownerProcessId})`);
+            await stateManager.deleteBotState(streamerId).catch(() => {});
             continue;
           }
         }
