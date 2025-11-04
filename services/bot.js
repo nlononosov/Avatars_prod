@@ -180,6 +180,10 @@ function checkInactiveAvatars(streamerId) {
       state.activeAvatars.delete(userId);
       state.avatarLastActivity.delete(userId);
       state.avatarStates.delete(userId);
+      // Удаляем из Redis асинхронно
+      removeActiveAvatar(streamerId, userId).catch(err => {
+        logLine(`[bot] Failed to remove active avatar from Redis: ${err.message}`);
+      });
       emitOverlay('avatarRemoved', { userId }, null, streamerId);
     }
   }
@@ -190,7 +194,15 @@ function updateAvatarActivity(streamerId, userId) {
   const state = getStreamerState(streamerId);
   const previousState = state.avatarStates.get(userId);
   state.avatarLastActivity.set(userId, Date.now());
-  state.activeAvatars.add(userId);
+  
+  // Добавляем только если еще не добавлен (для производительности избегаем лишних вызовов)
+  if (!state.activeAvatars.has(userId)) {
+    state.activeAvatars.add(userId);
+    // Синхронизируем с Redis асинхронно (fire-and-forget для производительности)
+    addActiveAvatar(streamerId, userId).catch(err => {
+      logLine(`[bot] Failed to sync active avatar: ${err.message}`);
+    });
+  }
   
   if (previousState === 'tired') {
     state.avatarStates.set(userId, 'normal');
@@ -258,27 +270,67 @@ async function refreshToken(profile) {
 }
 
 async function ensureBotFor(uid) {
-  // Проверяем, есть ли уже бот для этого стримера
+  // Проверяем, есть ли уже бот для этого стримера локально
   if (botClients.has(uid) && botClients.get(uid).client) {
     const botData = botClients.get(uid);
     logLine(`[bot] Already connected for user ${uid}`);
     return { profile: botData.profile, client: botData.client };
   }
 
-  let profile = getUserByTwitchId(uid);
-  if (!profile) throw new Error('User not found in DB');
-
-  // Check if token is expired and refresh if needed
-  if (profile.expires_at && Date.now() / 1000 > profile.expires_at) {
-    logLine(`[bot] Token expired for user ${uid}, refreshing...`);
-    try {
-      profile = await refreshToken(profile);
-    } catch (error) {
-      throw new Error(`Token refresh failed: ${error.message}`);
-    }
+  // Проверяем в Redis, не запущен ли бот в другом процессе
+  const { stateManager } = require('../lib/state-redis');
+  const botState = await stateManager.getBotState(uid);
+  if (botState && botState.active && botState.ownerProcessId) {
+    // Бот уже запущен в другом процессе
+    logLine(`[bot] Bot for streamer ${uid} is already active in process ${botState.ownerProcessId}, skipping creation`);
+    throw new Error(`Bot is already active in another process`);
   }
 
-  const client = new tmi.Client({
+  // Используем распределенную блокировку для создания бота
+  const Redlock = require('redlock');
+  const { getClient } = require('../lib/redis');
+  const redisClient = await getClient();
+  const redlock = new Redlock([redisClient], {
+    driftFactor: 0.01,
+    retryCount: 3,
+    retryDelay: 200,
+    retryJitter: 100,
+  });
+
+  const lockKey = `lock:bot:create:${uid}`;
+  const lockTTL = 10000; // 10 секунд на создание бота
+
+  let lock;
+  try {
+    lock = await redlock.acquire([lockKey], lockTTL);
+    logLine(`[bot] Acquired lock for bot creation: ${uid}`);
+    
+    // Повторная проверка после получения блокировки (double-check)
+    const recheckBotState = await stateManager.getBotState(uid);
+    if (recheckBotState && recheckBotState.active && recheckBotState.ownerProcessId) {
+      logLine(`[bot] Bot for streamer ${uid} was created by another process while waiting for lock`);
+      await lock.release();
+      throw new Error(`Bot is already active in another process`);
+    }
+
+    let profile = getUserByTwitchId(uid);
+    if (!profile) {
+      await lock.release();
+      throw new Error('User not found in DB');
+    }
+
+    // Check if token is expired and refresh if needed
+    if (profile.expires_at && Date.now() / 1000 > profile.expires_at) {
+      logLine(`[bot] Token expired for user ${uid}, refreshing...`);
+      try {
+        profile = await refreshToken(profile);
+      } catch (error) {
+        await lock.release();
+        throw new Error(`Token refresh failed: ${error.message}`);
+      }
+    }
+
+    const client = new tmi.Client({
     options: { debug: false },
     connection: { secure: true, reconnect: true },
     identity: { username: profile.login, password: `oauth:${profile.access_token}` },
@@ -296,9 +348,10 @@ async function ensureBotFor(uid) {
     connectionRejector = reject;
   });
   
-  client.on('connected', (addr, port) => {
+  client.on('connected', async (addr, port) => {
     logLine(`[bot] connected to ${addr}:${port} → #${profile.login} for streamer ${uid}`);
-    botClients.set(uid, { client, profile, ready: true, ...states });
+    const processId = `${process.pid}-${Date.now()}`;
+    botClients.set(uid, { client, profile, ready: true, processId, ...states });
     
     // Загружаем настройки тайминга из БД
     try {
@@ -312,10 +365,17 @@ async function ensureBotFor(uid) {
       logLine(`[bot] Error loading timeout from DB: ${error.message}`);
     }
     
-    // Сохраняем состояние бота в Redis
-    saveBotStateToRedis(uid).catch(err => {
+    // Сохраняем состояние бота в Redis с указанием владельца процесса
+    await saveBotStateToRedis(uid, processId).catch(err => {
       logLine(`[bot] Failed to save bot state to Redis: ${err.message}`);
     });
+    
+    // Освобождаем блокировку после успешного создания
+    if (lock) {
+      await lock.release().catch(err => {
+        logLine(`[bot] Failed to release lock: ${err.message}`);
+      });
+    }
     
     startAvatarTimeoutChecker(uid);
     
@@ -334,24 +394,33 @@ async function ensureBotFor(uid) {
       connectionResolver({ profile, client });
     }
   });
-  client.on('disconnected', (reason) => {
+  client.on('disconnected', async (reason) => {
     logLine(`[bot] disconnected for streamer ${uid}: ${reason}`);
     if (botClients.has(uid)) {
       botClients.get(uid).ready = false;
     }
+    // Очищаем состояние бота в Redis при отключении
+    await stateManager.deleteBotState(uid).catch(err => {
+      logLine(`[bot] Failed to delete bot state from Redis: ${err.message}`);
+    });
     // Отписываемся от событий
     if (avatarShowHandler) {
       const { off } = require('../lib/bus');
       off('avatar:show', avatarShowHandler);
     }
   });
-  client.on('notice', (channel, msgid, message) => {
+  client.on('notice', async (channel, msgid, message) => {
     if (msgid === 'login_unrecognized') {
       logLine(`[bot] authentication failed for streamer ${uid}: ${message}`);
       botClients.delete(uid);
       if (connectionRejector) {
         connectionRejector(new Error(`Login authentication failed: ${message}`));
       }
+      // Очищаем состояние при ошибке аутентификации
+      if (lock) {
+        await lock.release().catch(() => {});
+      }
+      await stateManager.deleteBotState(uid).catch(() => {});
     }
   });
   client.on('message', (channel, tags, message, self) => {
@@ -431,7 +500,10 @@ async function ensureBotFor(uid) {
         source: 'twitch_chat'
       });
       
-      states.activeAvatars.add(userId);
+      // Добавляем аватар асинхронно (fire-and-forget для производительности)
+      addActiveAvatar(uid, userId).catch(err => {
+        logLine(`[bot] Failed to add active avatar: ${err.message}`);
+      });
       logLine(`[overlay] spawn requested by ${displayName} (${userId}) for streamer ${uid}`);
       return;
     }
@@ -524,7 +596,10 @@ async function ensureBotFor(uid) {
     if (!states.activeAvatars.has(userId)) {
       const avatarData = getAvatarByTwitchId(userId);
       if (avatarData) {
-        states.activeAvatars.add(userId);
+        // Добавляем аватар асинхронно (fire-and-forget для производительности)
+        addActiveAvatar(uid, userId).catch(err => {
+          logLine(`[bot] Failed to add active avatar: ${err.message}`);
+        });
         emitOverlay('spawn', {
           userId,
           displayName,
@@ -645,7 +720,6 @@ async function ensureBotFor(uid) {
     }, channel, uid);
   });
 
-  try {
     // Запускаем подключение
     await client.connect();
     
@@ -665,8 +739,18 @@ async function ensureBotFor(uid) {
     clearTimeout(timeout);
     return result;
   } catch (error) {
+    if (error.name === 'LockError') {
+      logLine(`[bot] Failed to acquire lock for bot creation: ${uid}, another process is creating the bot`);
+      throw new Error(`Bot creation in progress by another process`);
+    }
     logLine(`[bot] connection failed: ${error.message}`);
     botClients.delete(uid);
+    // Освобождаем блокировку при ошибке
+    if (lock) {
+      await lock.release().catch(() => {});
+    }
+    // Очищаем состояние бота в Redis
+    await stateManager.deleteBotState(uid).catch(() => {});
     throw error;
   }
 }
@@ -715,16 +799,30 @@ function status() {
 }
 
 // Функция для добавления аватара в активный список (для донатов)
-function addActiveAvatar(streamerId, userId) {
+async function addActiveAvatar(streamerId, userId) {
   const state = getStreamerState(streamerId);
   state.activeAvatars.add(userId);
+  
+  // Синхронизируем с Redis для всех процессов
+  const { stateManager } = require('../lib/state-redis');
+  await stateManager.addActiveAvatar(streamerId, userId).catch(err => {
+    logLine(`[bot] Failed to sync active avatar to Redis: ${err.message}`);
+  });
+  
   logLine(`[bot] Added avatar ${userId} to active list for streamer ${streamerId}`);
 }
 
 // Функция для удаления аватара из активного списка
-function removeActiveAvatar(streamerId, userId) {
+async function removeActiveAvatar(streamerId, userId) {
   const state = getStreamerState(streamerId);
   state.activeAvatars.delete(userId);
+  
+  // Синхронизируем с Redis для всех процессов
+  const { stateManager } = require('../lib/state-redis');
+  await stateManager.removeActiveAvatar(streamerId, userId).catch(err => {
+    logLine(`[bot] Failed to sync active avatar removal to Redis: ${err.message}`);
+  });
+  
   logLine(`[bot] Removed avatar ${userId} from active list for streamer ${streamerId}`);
 }
 
@@ -783,6 +881,27 @@ function startRace(streamerId, client, channel, raceState, settings = {}) {
   raceState.startTime = null;
   raceState.minParticipants = minParticipants;
   raceState.maxParticipants = maxParticipants;
+
+  // Синхронизируем состояние игры с Redis
+  const { stateManager } = require('../lib/state-redis');
+  const gameStateForRedis = {
+    isActive: raceState.isActive,
+    participants: Array.from(raceState.participants),
+    participantNames: Object.fromEntries(raceState.participantNames),
+    positions: Object.fromEntries(raceState.positions),
+    speeds: Object.fromEntries(raceState.speeds),
+    speedModifiers: Object.fromEntries(raceState.speedModifiers),
+    maxParticipants: raceState.maxParticipants,
+    minParticipants: raceState.minParticipants,
+    raceStarted: raceState.raceStarted,
+    raceFinished: raceState.raceFinished,
+    winner: raceState.winner,
+    startTime: raceState.startTime,
+    countdown: raceState.countdown
+  };
+  stateManager.setGameState(streamerId, 'race', gameStateForRedis).catch(err => {
+    logLine(`[bot] Failed to sync race state to Redis: ${err.message}`);
+  });
 
   client.say(channel, `🏁 Кто хочет участвовать в гонке, отправьте + в чат! У вас есть ${registrationTime} секунд! (${minParticipants}-${maxParticipants} участников)`).catch(err => logLine(`[bot] say error: ${err.message}`));
   
@@ -898,6 +1017,28 @@ function finishRace(winnerId, client, channel) {
   // Get winner's display name from participants
   const winnerName = raceState.participantNames.get(winnerId) || winnerId;
   
+  // Синхронизируем завершение игры с Redis
+  const { stateManager } = require('../lib/state-redis');
+  const streamerId = Array.from(botClients.entries()).find(([id, data]) => data.client === client)?.[0];
+  if (streamerId) {
+    const gameStateForRedis = {
+      isActive: raceState.isActive,
+      participants: Array.from(raceState.participants),
+      participantNames: Object.fromEntries(raceState.participantNames),
+      positions: Object.fromEntries(raceState.positions),
+      speeds: Object.fromEntries(raceState.speeds),
+      speedModifiers: Object.fromEntries(raceState.speedModifiers),
+      maxParticipants: raceState.maxParticipants,
+      raceStarted: raceState.raceStarted,
+      raceFinished: raceState.raceFinished,
+      winner: raceState.winner,
+      startTime: raceState.startTime
+    };
+    stateManager.setGameState(streamerId, 'race', gameStateForRedis).catch(err => {
+      logLine(`[bot] Failed to sync race finish to Redis: ${err.message}`);
+    });
+  }
+  
   // Emit race finish
   emitOverlay('raceFinish', {
     winner: winnerId,
@@ -918,6 +1059,13 @@ function finishRace(winnerId, client, channel) {
     raceState.raceStarted = false;
     raceState.raceFinished = false;
     raceState.winner = null;
+    
+    // Удаляем состояние игры из Redis после сброса
+    if (streamerId) {
+      stateManager.deleteGameState(streamerId, 'race').catch(err => {
+        logLine(`[bot] Failed to delete race state from Redis: ${err.message}`);
+      });
+    }
   }, 5000);
 }
 
@@ -2040,6 +2188,15 @@ async function restoreBotsFromRedis() {
         // Проверяем состояние бота в Redis
         const botState = await stateManager.getBotState(streamerId);
         
+        // Если бот активен в другом процессе, не восстанавливаем его
+        if (botState && botState.active && botState.ownerProcessId) {
+          const currentProcessId = `${process.pid}`;
+          if (botState.ownerProcessId && !botState.ownerProcessId.startsWith(currentProcessId)) {
+            logLine(`[bot] Bot for streamer ${streamerId} is already active in another process (${botState.ownerProcessId}), skipping restoration`);
+            continue;
+          }
+        }
+        
         if (botState && botState.active) {
           // Восстанавливаем состояние
           const localState = getStreamerState(streamerId);
@@ -2065,13 +2222,17 @@ async function restoreBotsFromRedis() {
             }
           }
           
-          // Переподключаем бота к Twitch
+          // Переподключаем бота к Twitch только если он не активен в другом процессе
           try {
             await ensureBotFor(streamerId);
             restored++;
             logLine(`[bot] Restored bot for streamer ${streamerId}`);
           } catch (error) {
-            logLine(`[bot] Failed to restore bot for streamer ${streamerId}: ${error.message}`);
+            if (error.message.includes('already active') || error.message.includes('another process')) {
+              logLine(`[bot] Bot for streamer ${streamerId} is managed by another process, skipping restoration`);
+            } else {
+              logLine(`[bot] Failed to restore bot for streamer ${streamerId}: ${error.message}`);
+            }
           }
         }
       } catch (error) {
@@ -2086,7 +2247,7 @@ async function restoreBotsFromRedis() {
 }
 
 // Сохранение состояния бота в Redis
-async function saveBotStateToRedis(streamerId) {
+async function saveBotStateToRedis(streamerId, processId) {
   try {
     const { stateManager } = require('../lib/state-redis');
     const botData = botClients.get(streamerId);
@@ -2098,6 +2259,7 @@ async function saveBotStateToRedis(streamerId) {
     const state = getStreamerState(streamerId);
     const botState = {
       active: botData.client && botData.ready,
+      ownerProcessId: processId || botData.processId || `${process.pid}-${Date.now()}`,
       avatarTimeoutSeconds: state.avatarTimeoutSeconds,
       lastUpdate: Date.now()
     };
