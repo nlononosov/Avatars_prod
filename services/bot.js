@@ -90,7 +90,8 @@ function getPlaneGameState(streamerId) {
 // Помощник для отправки событий в канал стримера
 function emitOverlay(event, payload, channel, streamerId) {
   if (streamerId) {
-    emitToStreamer(streamerId, event, payload);
+    // Normalize streamerId to string for consistent matching
+    emitToStreamer(String(streamerId), event, payload);
   } else {
     emit(event, payload);
   }
