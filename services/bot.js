@@ -321,9 +321,20 @@ async function ensureBotFor(uid) {
     // Повторная проверка после получения блокировки (double-check)
     const recheckBotState = await stateManager.getBotState(uid);
     if (recheckBotState && recheckBotState.active && recheckBotState.ownerProcessId) {
-      logLine(`[bot] Bot for streamer ${uid} was created by another process while waiting for lock`);
-      await lock.unlock();
-      throw new Error(`Bot is already active in another process`);
+      const recheckOwnerProcessId = String(recheckBotState.ownerProcessId);
+      // Проверяем, является ли текущий процесс владельцем
+      if (recheckOwnerProcessId && !recheckOwnerProcessId.startsWith(currentProcessId)) {
+        // Бот действительно создан другим процессом
+        logLine(`[bot] Bot for streamer ${uid} was created by another process (${recheckOwnerProcessId}) while waiting for lock`);
+        await lock.unlock();
+        throw new Error(`Bot is already active in another process`);
+      } else {
+        // Бот был в этом же процессе, но упал - очищаем старое состояние
+        logLine(`[bot] Found stale bot state for current process, clearing...`);
+        await stateManager.deleteBotState(uid).catch(err => {
+          logLine(`[bot] Failed to clear stale bot state: ${err.message}`);
+        });
+      }
     }
 
     let profile = getUserByTwitchId(uid);
