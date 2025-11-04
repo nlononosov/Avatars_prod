@@ -490,10 +490,10 @@ async function ensureBotFor(uid) {
         logLine(`[bot] Error adding user to streamer: ${error.message}`);
       }
       
-      // Emit avatar:show event
-      emitToStreamer(uid, 'avatar:show', {
-        streamerId: uid,
-        twitchUserId: userId,
+      // Emit avatar:show event (normalize uid to string for consistent streamerId matching)
+      emitToStreamer(String(uid), 'avatar:show', {
+        streamerId: String(uid),
+        twitchUserId: String(userId),
         displayName: displayName,
         color: color,
         avatarData,
