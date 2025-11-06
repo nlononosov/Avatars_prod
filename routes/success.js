@@ -925,8 +925,8 @@ function registerSuccessRoute(app) {
     // Logout
     document.getElementById('logoutBtn').onclick = async () => {
       if (confirm('Вы уверены, что хотите выйти?')) {
-        try { 
-          await fetch('/auth/logout', { method: 'POST' }); 
+        try {
+          await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' });
         } catch(_) {}
       window.location = '/';
       }

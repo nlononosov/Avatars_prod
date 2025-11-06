@@ -548,10 +548,16 @@
     const error = urlParams.get('error');
     const details = urlParams.get('details');
     
+    const TWITCH_CONFIG_ERROR_MESSAGE = '❌ Неверный или не установлен Client ID.\n\nВАЖНО: Проверьте следующие пункты:\n1. Откройте файл .env в корне проекта\n2. Найдите строку TWITCH_CLIENT_ID=\n3. Убедитесь, что значение:\n   - НЕ является "your_twitch_client_id" или другой заглушкой\n   - НЕ содержит лишних пробелов или кавычек\n   - Начинается с реального Client ID (обычно строка из ~30 символов)\n4. Получите реальный Client ID на https://dev.twitch.tv/console/apps\n5. Установите Redirect URI: http://localhost:3000/auth/twitch/callback\n6. Сохраните .env и перезапустите сервер\nЕсли используете Client Secret, также проверьте TWITCH_CLIENT_SECRET.';
+
     if (error) {
       let errorMessage = 'Произошла ошибка при авторизации.';
-      
+
       switch (error) {
+        case 'twitch_config_missing':
+        case 'twitch_invalid_client':
+          errorMessage = TWITCH_CONFIG_ERROR_MESSAGE;
+          break;
         case 'oauth_denied':
           errorMessage = '❌ Авторизация через DonationAlerts была отменена.';
           break;
@@ -668,7 +674,27 @@
         }
 
         const r = await fetch('/auth/twitch/init', { credentials: 'same-origin' });
-        if (!r.ok) throw new Error('init failed');
+        if (!r.ok) {
+          let payload = null;
+          try {
+            payload = await r.json();
+          } catch (_) {}
+
+          if (payload && payload.code === 'twitch_config_missing') {
+            showError(payload.message || TWITCH_CONFIG_ERROR_MESSAGE);
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+            return;
+          }
+
+          const err = new Error('init failed');
+          if (payload) {
+            err.userMessage = payload.message;
+            err.code = payload.code;
+          }
+          throw err;
+        }
+
         const { authorizeUrl } = await r.json();
         if (!authorizeUrl) throw new Error('no authorize url');
 
@@ -681,10 +707,15 @@
         // Восстанавливаем кнопку
         btn.innerHTML = originalText;
         btn.disabled = false;
-        
+
+        if (e && e.code === 'twitch_config_missing') {
+          showError(e.userMessage || TWITCH_CONFIG_ERROR_MESSAGE);
+          return;
+        }
+
         // Показываем ошибку
-        showError('❌ Ошибка подключения. Попробуйте еще раз.');
-        
+        showError(e && e.userMessage ? e.userMessage : '❌ Ошибка подключения. Попробуйте еще раз.');
+
         // Фолбэк
         setTimeout(() => {
         window.location = '/auth/twitch';
